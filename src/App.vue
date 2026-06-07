@@ -147,6 +147,18 @@ const computedPaths = computed<ComputedPath[]>(() => {
   })
 })
 
+const contentWidth = computed(() => {
+  if (!renderedNodes.value.length) return '100%'
+  const maxX = Math.max(...renderedNodes.value.map(n => n.x))
+  return `max(100%, ${maxX + 600}px)` // Automatically extends 600px past the furthest node
+})
+
+const gridLineCount = computed(() => {
+  const maxX = renderedNodes.value.length ? Math.max(...renderedNodes.value.map(n => n.x)) : 0
+  const pxWidth = Math.max(2000, maxX + 600)
+  return Math.ceil(pxWidth / 80)
+})
+
 function nodeGradient(node: RenderedNode): string {
   const colors = node.characters.map(name => characters.value.find(c => c.name === name)?.color ?? '#94a3b8')
   if (colors.length === 0) return '#0f172a'
@@ -212,19 +224,30 @@ function removeCharFromBeat(name: string) {
 // Drag
 // ---------------------------------------------------------------------------
 
-const drag = ref<{ id: string; startMouseX: number; startNodeX: number } | null>(null)
+const drag = ref<{ id: string; startX: number; startNodeX: number } | null>(null)
 
-function startDrag(e: MouseEvent, id: string) {
-  const beat = beats.value.find(b => b.id === id)
-  if (beat) drag.value = { id, startMouseX: e.clientX, startNodeX: beat.x }
+// Helper to pull the X coordinate from either a mouse or a touch event
+function getClientX(e: MouseEvent | TouchEvent) {
+  return 'touches' in e ? e.touches[0].clientX : e.clientX
 }
 
-function onDrag(e: MouseEvent) {
-  if (!drag.value || !boardEl.value) return
+function startDrag(e: MouseEvent | TouchEvent, id: string) {
+  const beat = beats.value.find(b => b.id === id)
+  if (beat) drag.value = { id, startX: getClientX(e), startNodeX: beat.x }
+}
+
+function onDrag(e: MouseEvent | TouchEvent) {
+  if (!drag.value) return
   const beat = beats.value.find(b => b.id === drag.value!.id)
   if (!beat) return
-  const { width } = boardEl.value.getBoundingClientRect()
-  beat.x = Math.max(30, Math.min(drag.value.startNodeX + e.clientX - drag.value.startMouseX, width - 30))
+
+  // Prevent default scroll behavior while actively dragging a node
+  if (e.cancelable) e.preventDefault()
+
+  const newX = drag.value.startNodeX + getClientX(e) - drag.value.startX
+  
+  // Bound to the left side (30px), but infinite to the right
+  beat.x = Math.max(30, newX)
 }
 
 function endDrag() { drag.value = null }
@@ -283,52 +306,54 @@ function onImport(e: Event) {
   </div>
 
   <div class="layout">
-    <!-- Canvas -->
     <div
       ref="boardEl"
       class="board"
       @mousemove="onDrag"
       @mouseup="endDrag"
       @mouseleave="endDrag"
+      @touchmove="onDrag"
+      @touchend="endDrag"
+      @touchcancel="endDrag"
     >
-      <p v-if="!renderedNodes.length" class="board-empty">
-        Canvas is empty — add a node from the panel.
-      </p>
+      <div class="board-content" :style="{ minWidth: contentWidth }">
+        <p v-if="!renderedNodes.length" class="board-empty">
+          Canvas is empty — add a node from the panel.
+        </p>
 
-      <svg class="board-svg">
-        <!-- Grid lines -->
-        <line
-          v-for="i in 20" :key="i"
-          :x1="i * 80" y1="0" :x2="i * 80" y2="100%"
-          stroke="#f1f5f9" stroke-width="1"
-        />
-        <!-- Character paths -->
-        <path
-          v-for="path in computedPaths" :key="path.character"
-          :d="path.d" :stroke="path.color"
-          fill="none" stroke-width="2.5" stroke-linecap="round"
-        />
-      </svg>
+        <svg class="board-svg">
+          <line
+            v-for="i in gridLineCount" :key="i"
+            :x1="i * 80" y1="0" :x2="i * 80" y2="100%"
+            stroke="#f1f5f9" stroke-width="1"
+          />
+          <path
+            v-for="path in computedPaths" :key="path.character"
+            :d="path.d" :stroke="path.color"
+            fill="none" stroke-width="2.5" stroke-linecap="round"
+          />
+        </svg>
 
-      <!-- Beat nodes -->
-      <div
-        v-for="node in renderedNodes" :key="node.id"
-        class="node"
-        :class="{ active: activeId === node.id }"
-        :style="{
-          left: node.x + 'px',
-          top: node.y + 'px',
-          width: node.radius * 2 + 'px',
-          height: node.radius * 2 + 'px',
-          background: nodeGradient(node),
-        }"
-        @mousedown="startDrag($event, node.id)"
-        @click.stop="activeId = node.id"
-      >
-        <span class="node-label">{{ node.title }}</span>
+        <div
+          v-for="node in renderedNodes" :key="node.id"
+          class="node"
+          :class="{ active: activeId === node.id }"
+          :style="{
+            left: node.x + 'px',
+            top: node.y + 'px',
+            width: node.radius * 2 + 'px',
+            height: node.radius * 2 + 'px',
+            background: nodeGradient(node),
+          }"
+          @mousedown="startDrag($event, node.id)"
+          @touchstart="startDrag($event, node.id)"
+          @click.stop="activeId = node.id"
+        >
+          <span class="node-label">{{ node.title }}</span>
+        </div>
       </div>
     </div>
-
+    
     <!-- Side panel -->
     <aside class="panel">
 
