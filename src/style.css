@@ -40,11 +40,16 @@ body {
 /* Board */
 .board {
   flex: 1;
-  position: relative;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   background: #fff;
   cursor: default;
   user-select: none;
+}
+
+.board-content {
+  position: relative;
+  height: 100%;
 }
 
 .board-svg {
@@ -70,7 +75,7 @@ body {
 .node {
   position: absolute;
   transform: translate(-50%, -50%);
-  color: #fff;         /* removed background line */
+  color: #fff;
   border-radius: 50%;
   width: 36px;
   height: 36px;
@@ -80,6 +85,7 @@ body {
   cursor: grab;
   transition: background 0.15s, box-shadow 0.15s;
   box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+  touch-action: none; /* CRITICAL: Prevents mobile viewport scrolling when dragging */
 }
 
 .node:active { cursor: grabbing; }
