@@ -1,0 +1,113 @@
+{
+  "characters": [
+    {
+      "name": "Arkady",
+      "color": "#580404"
+    },
+    {
+      "name": "Nicholai",
+      "color": "#10b981"
+    },
+    {
+      "name": "Katerina",
+      "color": "#f59e0b"
+    },
+    {
+      "name": "Jeffrey",
+      "color": "#83ece0"
+    },
+    {
+      "name": "Kaladin",
+      "color": "#f97316"
+    }
+  ],
+  "beats": [
+    {
+      "id": 1,
+      "x": 90,
+      "title": "Arrival",
+      "characters": [
+        "Arkady"
+      ],
+      "importance": 5,
+      "details": "Arkady touches down at the outer railway siding under an overcast sky."
+    },
+    {
+      "id": 2,
+      "x": 601,
+      "title": "An Old Estate",
+      "characters": [
+        "Nicholai",
+        "Katerina"
+      ],
+      "importance": 3,
+      "details": "Family meetings resume within the parlor quarters to track incoming land values."
+    },
+    {
+      "id": 3,
+      "x": 461,
+      "title": "The Heated Debate",
+      "characters": [
+        "Arkady",
+        "Nicholai"
+      ],
+      "importance": 5,
+      "details": "Tensions flare over political ideological transformations occurring across Europe."
+    },
+    {
+      "id": 4,
+      "x": 756,
+      "title": "Solitary Reflection",
+      "characters": [
+        "Arkady",
+        "Jeffrey"
+      ],
+      "importance": 2,
+      "details": "An evening walk past the orchard property line lines up a map of personal revelations."
+    },
+    {
+      "id": 5,
+      "x": 214,
+      "title": "Secret Correspondence",
+      "characters": [
+        "Nicholai",
+        "Jeffrey"
+      ],
+      "importance": 5,
+      "details": "A critical piece of paper is hidden securely beneath an office document array drawer stack."
+    },
+    {
+      "id": 6,
+      "x": 1025,
+      "title": "The Confrontation",
+      "characters": [
+        "Arkady",
+        "Nicholai",
+        "Katerina",
+        "Kaladin"
+      ],
+      "importance": 5,
+      "details": "All cards are displayed open on the table in a stunning clashing alignment of motivations."
+    },
+    {
+      "id": "3a8cdfb8-2279-4312-bb07-b1bec8d3e378",
+      "x": 118,
+      "title": "Jeffrey arrives",
+      "characters": [
+        "Jeffrey"
+      ],
+      "importance": 3,
+      "details": ""
+    },
+    {
+      "id": "fc0159ff-a3c9-4d48-b5be-fefd2255a16f",
+      "x": 352,
+      "title": "Kaladin arrives",
+      "characters": [
+        "Kaladin"
+      ],
+      "importance": 5,
+      "details": ""
+    }
+  ]
+}
