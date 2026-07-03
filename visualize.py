@@ -42,6 +42,9 @@ def draw_striped_line(surface: pygame.Surface, start_pos: tuple[float, float], e
 
 def visualize(beats: list[Beat], edges: list[Edge], width, height):
     pygame.init()
+
+    for beat in beats:
+        beat.y = beat.y + 300
     
     # Setup Display
     screen = pygame.display.set_mode((width, height))

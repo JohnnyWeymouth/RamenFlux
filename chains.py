@@ -11,8 +11,6 @@ def compress_chains(beats: list[Beat]) -> tuple[list[Beat], list[Edge], list[Hid
         key = (chain.still_visible_start_beat.id, chain.still_visible_end_beat.id)
         if key not in edges_map:
             edges_map[key] = Edge(chain.still_visible_start_beat, chain.still_visible_end_beat, [])
-    for ab in active_beats:
-        print(ab.title)
     active_beats = sorted(active_beats, key=lambda x: x.x)
     characters = {char for beat in beats for char in beat.characters}
     for char in characters:
