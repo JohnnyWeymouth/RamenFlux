@@ -19,6 +19,12 @@ const isSidebarOpen = ref(true)
 // Modal states
 const isModalOpen = ref(false)
 const isTrashModalOpen = ref(false)
+const isCharModalOpen = ref(false)
+
+// Character Edit State
+const activeCharName = ref<string | null>(null)
+const editCharName = ref('')
+const editCharColor = ref('')
 
 const boardEl   = ref<HTMLElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -150,7 +156,6 @@ function deleteActiveBeat() {
   if (!activeBeat.value) return
   const idx = beats.value.findIndex(b => b.id === activeBeat.value!.id)
   if (idx !== -1) {
-    // Send to trash instead of completely deleting
     trashed.value.push(beats.value[idx])
     beats.value.splice(idx, 1)
   }
@@ -201,6 +206,74 @@ function createAndAddCharInModal() {
     activeBeat.value.characters.push(name)
   }
   modalNewCharName.value = ''
+}
+
+// ---------------------------------------------------------------------------
+// Character Editing & Deletion
+// ---------------------------------------------------------------------------
+
+function openCharModal(char: Character) {
+  activeCharName.value = char.name
+  editCharName.value = char.name
+  editCharColor.value = char.color
+  isCharModalOpen.value = true
+}
+
+function closeCharModal() {
+  isCharModalOpen.value = false
+  activeCharName.value = null
+}
+
+function saveCharacter() {
+  if (!activeCharName.value) return
+  
+  const newName = editCharName.value.trim()
+  if (!newName) return
+
+  if (newName !== activeCharName.value && charNames.value.includes(newName)) {
+    alert('Character name must be unique.')
+    return
+  }
+
+  const oldName = activeCharName.value
+  const charIndex = characters.value.findIndex(c => c.name === oldName)
+  
+  if (charIndex !== -1) {
+    characters.value[charIndex].name = newName
+    characters.value[charIndex].color = editCharColor.value
+
+    if (newName !== oldName) {
+      const cascadeRename = (beatList: Beat[]) => {
+        beatList.forEach(beat => {
+          const idx = beat.characters.indexOf(oldName)
+          if (idx !== -1) beat.characters.splice(idx, 1, newName)
+        })
+      }
+      cascadeRename(beats.value)
+      cascadeRename(trashed.value)
+    }
+  }
+  closeCharModal()
+}
+
+function deleteCharacter() {
+  if (!activeCharName.value) return
+  if (!confirm(`Are you sure you want to delete ${activeCharName.value}? This will remove them from all beats.`)) return
+  
+  const nameToDelete = activeCharName.value
+
+  characters.value = characters.value.filter(c => c.name !== nameToDelete)
+  
+  const cascadeDelete = (beatList: Beat[]) => {
+    beatList.forEach(beat => {
+      beat.characters = beat.characters.filter(n => n !== nameToDelete)
+    })
+  }
+  
+  cascadeDelete(beats.value)
+  cascadeDelete(trashed.value)
+  
+  closeCharModal()
 }
 
 // ---------------------------------------------------------------------------
@@ -270,7 +343,7 @@ function onImport(e: Event) {
       if (parsed.characters && parsed.beats) {
         characters.value = parsed.characters
         beats.value = parsed.beats
-        trashed.value = [] // Reset trash on import
+        trashed.value = []
         activeId.value = beats.value[0]?.id ?? null
       } else {
         alert('Invalid export format.')
@@ -324,13 +397,8 @@ function onImport(e: Event) {
         <div class="divider" />
 
         <div class="char-list">
-          <div v-for="c in characters" :key="c.name" class="char-entry">
-            <input
-              type="color"
-              :value="c.color"
-              @input="c.color = ($event.target as HTMLInputElement).value"
-              class="char-color-picker"
-            />
+          <div v-for="c in characters" :key="c.name" class="char-entry" @click="openCharModal(c)">
+            <div class="char-color-preview" :style="{ backgroundColor: c.color }"></div>
             <span>{{ c.name }}</span>
           </div>
           <p v-if="!characters.length" class="muted" style="margin-bottom:8px">No characters yet.</p>
@@ -482,6 +550,32 @@ function onImport(e: Event) {
 
       <div class="modal-footer" style="justify-content: flex-end;">
         <button class="btn-action" style="width: auto; padding: 8px 24px;" @click="isTrashModalOpen = false">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="isCharModalOpen" class="modal-overlay" @mousedown.self="closeCharModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Edit Character</h3>
+        <button class="btn-icon" @click="closeCharModal">✖</button>
+      </div>
+
+      <div class="modal-body">
+        <label class="field-label">Character Name</label>
+        <input type="text" v-model="editCharName" placeholder="e.g. John Doe" @keyup.enter="saveCharacter" />
+
+        <label class="field-label" style="margin-top:12px">Character Color</label>
+        <input 
+          type="color" 
+          v-model="editCharColor" 
+          style="width: 100%; height: 40px; padding: 2px; cursor: pointer; border: 1px solid #e2e8f0; border-radius: 6px; background: #fff;" 
+        />
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-io text-danger" @click="deleteCharacter">🗑️ Delete Character</button>
+        <button class="btn-action" style="width: auto; padding: 8px 24px;" @click="saveCharacter">Save Changes</button>
       </div>
     </div>
   </div>

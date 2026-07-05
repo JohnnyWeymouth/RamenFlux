@@ -26,8 +26,7 @@ body {
 /* Board */
 .board {
   flex: 1;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: auto; 
   background: #fff;
   cursor: default;
   user-select: none;
@@ -35,7 +34,7 @@ body {
 
 .board-content {
   position: relative;
-  height: 100%;
+  min-height: 100%;
 }
 
 .board-svg {
@@ -111,17 +110,17 @@ body {
 }
 
 .panel.is-collapsed {
-  margin-left: -280px; /* Pulls the panel exactly its width to the left */
+  margin-left: -280px;
 }
 
 .sidebar-toggle {
   position: absolute;
   top: 20px;
-  left: 280px; /* Matches panel width */
+  left: 280px;
   z-index: 50;
   background: #fff;
   border: 1px solid #e2e8f0;
-  border-left: none; /* Blends it seamlessly with the open panel */
+  border-left: none;
   padding: 12px 6px;
   border-radius: 0 8px 8px 0;
   cursor: pointer;
@@ -139,7 +138,6 @@ body {
   color: #2563eb;
 }
 
-/* Shift the tab and add a border when the panel is closed */
 .sidebar-toggle.is-collapsed {
   left: 0;
   border-left: 1px solid #e2e8f0; 
@@ -333,17 +331,22 @@ input[type="range"] { width: 100%; margin: 4px 0 2px; }
   gap: 8px;
   margin-bottom: 8px;
   font-size: 0.85rem;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
 }
 
-.char-color-picker {
+.char-entry:hover {
+  background: #f1f5f9;
+}
+
+.char-color-preview {
   width: 22px;
   height: 22px;
-  border: none;
   border-radius: 50%;
-  padding: 0;
-  cursor: pointer;
-  background: none;
   flex-shrink: 0;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.1);
 }
 
 .trash-row {
