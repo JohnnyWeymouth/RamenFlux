@@ -20,6 +20,7 @@ body {
   flex: 1;
   overflow: hidden;
   height: 100vh;
+  position: relative;
 }
 
 /* Board */
@@ -101,11 +102,48 @@ body {
   background: #f8fafc;
   border-right: 1px solid #e2e8f0;
   overflow-y: auto;
-  padding: 20px 16px;
+  padding: 20px 16px 80px 16px; 
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
   z-index: 10;
+  transition: margin-left 0.3s ease-in-out;
+}
+
+.panel.is-collapsed {
+  margin-left: -280px; /* Pulls the panel exactly its width to the left */
+}
+
+.sidebar-toggle {
+  position: absolute;
+  top: 20px;
+  left: 280px; /* Matches panel width */
+  z-index: 50;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-left: none; /* Blends it seamlessly with the open panel */
+  padding: 12px 6px;
+  border-radius: 0 8px 8px 0;
+  cursor: pointer;
+  color: #64748b;
+  box-shadow: 4px 2px 8px rgba(0,0,0,0.04);
+  transition: left 0.3s ease-in-out, background 0.2s, color 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8rem;
+}
+
+.sidebar-toggle:hover {
+  background: #f8fafc;
+  color: #2563eb;
+}
+
+/* Shift the tab and add a border when the panel is closed */
+.sidebar-toggle.is-collapsed {
+  left: 0;
+  border-left: 1px solid #e2e8f0; 
+  box-shadow: 2px 2px 8px rgba(0,0,0,0.1);
 }
 
 .brand-header {
@@ -133,13 +171,6 @@ body {
   line-height: 1.4;
   color: #64748b;
   margin-bottom: 24px;
-}
-
-.panel-bottom {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding-top: 20px;
 }
 
 .card {

@@ -14,6 +14,7 @@ const activeId    = ref<string | null>(null)
 const newCharName = ref('')
 const charToAdd   = ref('')
 const modalNewCharName = ref('')
+const isSidebarOpen = ref(true)
 
 // Modal states
 const isModalOpen = ref(false)
@@ -286,21 +287,42 @@ function onImport(e: Event) {
 <template>
   <div class="layout">
     
-    <aside class="panel">
+    <button 
+      class="sidebar-toggle" 
+      :class="{ 'is-collapsed': !isSidebarOpen }"
+      @click="isSidebarOpen = !isSidebarOpen"
+      title="Toggle sidebar"
+    >
+      {{ isSidebarOpen ? '◀' : '▶' }}
+    </button>
+
+    <aside class="panel" :class="{ 'is-collapsed': !isSidebarOpen }">
       <div class="brand-header">
         <h1>RamenFlux</h1>
         <img src="https://placehold.co/100x100/1e293b/ffffff?text=RF" alt="Logo" class="brand-logo" />
       </div>
+
       <p class="brand-subtitle">Drag plot-beats side to side. Track characters across beats.</p>
 
       <button class="btn-action btn-green" @click="addBeat">➕ Add plot beat</button>
+
       <button class="btn-io" @click="isTrashModalOpen = true">🗑️ View Trash</button>
-      <button class="btn-io" @click="exportData">📤 Export JSON</button>
-      <button class="btn-io" @click="importClick">📥 Import JSON</button>
-      <input ref="fileInput" type="file" accept="application/json,.json,text/plain" style="display:none" @change="onImport" />
+
+      <button class="btn-io" @click="exportData">📤 Download JSON</button>
+
+      <button class="btn-io" @click="importClick">📥 Import saved JSON</button>
+      <input ref="fileInput" type="file" style="display:none" @change="onImport" />
 
       <section class="card char-section">
         <h4>👥 Characters</h4>
+
+        <div class="divider" />
+
+        <input type="text" v-model="newCharName" placeholder="New character name" @keyup.enter="addGlobalChar" />
+        <button class="btn-action btn-slate" @click="addGlobalChar">Register</button>
+
+        <div class="divider" />
+
         <div class="char-list">
           <div v-for="c in characters" :key="c.name" class="char-entry">
             <input
@@ -313,10 +335,6 @@ function onImport(e: Event) {
           </div>
           <p v-if="!characters.length" class="muted" style="margin-bottom:8px">No characters yet.</p>
         </div>
-        
-        <div class="divider" />
-        <input type="text" v-model="newCharName" placeholder="New character name" @keyup.enter="addGlobalChar" />
-        <button class="btn-action btn-slate" @click="addGlobalChar">Register</button>
       </section>
 
     </aside>
