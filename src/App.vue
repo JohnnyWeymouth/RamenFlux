@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from 'vue'
+import { ref, computed, watch, onUnmounted, onMounted } from 'vue'
 import { useLayoutWorker } from './useLayoutWorker'
 import type { Beat, Character, RenderedNode, RenderedSegment } from './types'
 
@@ -36,8 +36,8 @@ const COLOR_PALETTE = ['#8b5cf6', '#ec4899', '#06b6d4', '#14b8a6', '#f97316', '#
 // ---------------------------------------------------------------------------
 
 const { request: requestLayout, dispose } = useLayoutWorker(beats, characters)
-onUnmounted(dispose)
 
+// 1. Define the reactive signature first so it is available to the watcher
 const layoutSignature = computed(() =>
   beats.value
     .map(b => `${b.id}:${Math.round(b.x)}:${[...b.characters].sort().join(',')}`)
@@ -47,14 +47,35 @@ const layoutSignature = computed(() =>
   characters.value.map(c => c.name).sort().join(',')
 )
 
+// 2. Declare a single block-scoped debounce token variable
 let debounce: ReturnType<typeof setTimeout> | null = null
-watch(layoutSignature, (_new, old) => {
+
+const triggerLayoutRecalc = (delay = 300) => {
   if (debounce) clearTimeout(debounce)
-  const delay = old === undefined ? 0 : 300
   debounce = setTimeout(() => {
     requestLayout(boardEl.value?.clientHeight ?? 600)
   }, delay)
+}
+
+// 3. Watch the computed layout signature for state changes
+watch(layoutSignature, (_new, old) => {
+  const delay = old === undefined ? 0 : 300
+  triggerLayoutRecalc(delay)
 }, { immediate: true })
+
+// 4. Handle resize & orientation events cleanly
+const handleResize = () => triggerLayoutRecalc(150)
+
+onMounted(() => {
+  window.addEventListener('resize', handleResize)
+  window.addEventListener('orientationchange', handleResize)
+})
+
+onUnmounted(() => {
+  dispose()
+  window.removeEventListener('resize', handleResize)
+  window.removeEventListener('orientationchange', handleResize)
+})
 
 // ---------------------------------------------------------------------------
 // Derived state
