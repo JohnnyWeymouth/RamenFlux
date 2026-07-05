@@ -10,11 +10,15 @@ import LayoutWorker from './layout.worker.ts?worker'
 export function useLayoutWorker(beats: Ref<Beat[]>, characters: Ref<Character[]>) {
   const worker = new LayoutWorker()
   let busy = false
-  let pending = false
+  // Height of the most recent request that arrived while we were busy, if
+  // any — re-issued as soon as the in-flight run finishes. (Previously this
+  // was dropped entirely: a change made mid-run never triggered a follow-up
+  // layout pass.)
+  let pendingHeight: number | null = null
 
   function request(canvasHeight: number) {
     if (busy || beats.value.length === 0) {
-      pending = true
+      pendingHeight = canvasHeight
       return
     }
     busy = true
@@ -37,11 +41,10 @@ export function useLayoutWorker(beats: Ref<Beat[]>, characters: Ref<Character[]>
       }
     }
 
-    if (pending) {
-      pending = false
-      // Re-request with whatever the board height currently is; caller may pass a getter.
-      // We use a sentinel so the caller must call request() again themselves.
-      pending = false
+    if (pendingHeight !== null) {
+      const h = pendingHeight
+      pendingHeight = null
+      request(h)
     }
   }
 

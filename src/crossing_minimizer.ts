@@ -20,6 +20,8 @@ export interface Edge {
 
 type RankMap = Record<string, number>
 
+const EPS = 1e-6
+
 // ---------------------------------------------------------------------------
 // Geometry
 // ---------------------------------------------------------------------------
@@ -36,19 +38,73 @@ function yAt(ya: number, yb: number, xa: number, xb: number, x: number): number 
   return ya + (yb - ya) * (x - xa) / (xb - xa)
 }
 
+function sharesNode(e1: Edge, e2: Edge): boolean {
+  return (
+    e1.node_1.name === e2.node_1.name || e1.node_1.name === e2.node_2.name ||
+    e1.node_2.name === e2.node_1.name || e1.node_2.name === e2.node_2.name
+  )
+}
+
+/**
+ * A zero-width "edge" that starts and ends at the same node. It doesn't
+ * represent a real connection — it exists purely so the crossing test below
+ * (which only knows how to compare edge-vs-edge) can also catch a *real*
+ * edge running straight through a node it isn't connected to. Plug these
+ * into the same edge/pair machinery as the real edges and node pass-throughs
+ * fall out "for free".
+ */
+function selfEdge(node: Node): Edge {
+  return { node_1: node, node_2: node }
+}
+
+/**
+ * Whether two edges cross when laid out at the given lane assignment.
+ *
+ * Bug fix: the original version only flagged a *strict sign change* in the
+ * vertical gap between the two segments across their shared X range. That
+ * misses two real, visually-bad cases where the gap never actually changes
+ * sign because it sits at (or pins to) zero the whole time:
+ *   - Two unrelated edges running exactly on top of each other (coincident
+ *     lines with different endpoints that happen to land on the same lanes).
+ *   - An edge passing directly through a node it doesn't connect to (via the
+ *     `selfEdge` trick above, this shows up as the same "pinned at zero"
+ *     pattern).
+ * Edges that legitimately touch at a *shared* node (e.g. two consecutive
+ * beats for the same character) still need to be excluded, since that's
+ * expected and not a bug.
+ */
 export function edgesCross(e1: Edge, e2: Edge, lane: RankMap): boolean {
   const [x1a, x1b] = xRange(e1)
   const [x2a, x2b] = xRange(e2)
   const overlapStart = Math.max(x1a, x2a)
   const overlapEnd   = Math.min(x1b, x2b)
-  if (overlapStart >= overlapEnd) return false
+  if (overlapStart > overlapEnd) return false // no shared X range at all
 
   const y1a = lane[e1.node_1.name], y1b = lane[e1.node_2.name]
   const y2a = lane[e2.node_1.name], y2b = lane[e2.node_2.name]
 
   const dStart = yAt(y1a, y1b, x1a, x1b, overlapStart) - yAt(y2a, y2b, x2a, x2b, overlapStart)
   const dEnd   = yAt(y1a, y1b, x1a, x1b, overlapEnd)   - yAt(y2a, y2b, x2a, x2b, overlapEnd)
-  return dStart * dEnd < 0
+
+  // Genuine sign-change crossing.
+  if (dStart * dEnd < -EPS) return true
+
+  // Otherwise the segments never truly swap sides — but if the gap is ~0
+  // across the *entire* overlap, the two lines are lying on top of one
+  // another (or one is passing exactly through the other's node).
+  if (Math.abs(dStart) < EPS && Math.abs(dEnd) < EPS) {
+    const sameEndpoints =
+      (e1.node_1.name === e2.node_1.name && e1.node_2.name === e2.node_2.name) ||
+      (e1.node_1.name === e2.node_2.name && e1.node_2.name === e2.node_1.name)
+    if (sameEndpoints) return false // identical run — meant to be drawn together, not a bug
+
+    const touchesOnlyAtSharedPoint = overlapStart === overlapEnd && sharesNode(e1, e2)
+    if (touchesOnlyAtSharedPoint) return false // e.g. two edges meeting at a shared beat
+
+    return true // coincident overlap or a node pass-through — count it
+  }
+
+  return false
 }
 
 // ---------------------------------------------------------------------------
@@ -60,7 +116,9 @@ export function overlappingPairs(edges: Edge[]): [number, number][] {
   const pairs: [number, number][] = []
   for (let i = 0; i < edges.length; i++) {
     for (let j = i + 1; j < edges.length; j++) {
-      if (Math.max(ranges[i][0], ranges[j][0]) < Math.min(ranges[i][1], ranges[j][1])) {
+      // <= (not <) so a zero-width self-edge sitting exactly at another
+      // edge's X position still counts as "overlapping" and gets tested.
+      if (Math.max(ranges[i][0], ranges[j][0]) <= Math.min(ranges[i][1], ranges[j][1])) {
         pairs.push([i, j])
       }
     }
@@ -112,8 +170,21 @@ function ranksToSpread(ranks: RankMap, nLanes: number): RankMap {
   )
 }
 
-function countCrossings(edges: Edge[], pairs: [number, number][], spread: RankMap): number {
+function countCrossingsForPairs(edges: Edge[], pairs: [number, number][], spread: RankMap): number {
   return pairs.filter(([i, j]) => edgesCross(edges[i], edges[j], spread)).length
+}
+
+/**
+ * Public helper: total crossing/violation count for a set of real edges and
+ * nodes at a given lane assignment. Internally folds in the same
+ * node-pass-through check used by the optimizer, so callers (e.g. the
+ * worker deciding whether a new layout is "better") are judging the layout
+ * by the same yardstick the optimizer used.
+ */
+export function countCrossings(edges: Edge[], nodes: Node[], lane: RankMap): number {
+  const allEdges = [...edges, ...nodes.map(selfEdge)]
+  const pairs = overlappingPairs(allEdges)
+  return countCrossingsForPairs(allEdges, pairs, lane)
 }
 
 function countPartialCrossings(
@@ -183,7 +254,7 @@ function greedy(
     ranks = shifted
   }
 
-  const crossings = countCrossings(edges, pairs, ranksToSpread(ranks, nLanes))
+  const crossings = countCrossingsForPairs(edges, pairs, ranksToSpread(ranks, nLanes))
   return { ranks, crossings }
 }
 
@@ -202,7 +273,7 @@ function localSearch(
   const names = Object.keys(initialRanks)
   let ranks = { ...initialRanks }
   let spread = ranksToSpread(ranks, nLanes)
-  let crossings = countCrossings(edges, pairs, spread)
+  let crossings = countCrossingsForPairs(edges, pairs, spread)
 
   let improved = true
   while (improved && Date.now() / 1000 < deadline) {
@@ -352,6 +423,89 @@ function branchAndBound(
 }
 
 // ---------------------------------------------------------------------------
+// Phase 4: Aesthetic refinement (lower priority than crossing count)
+// ---------------------------------------------------------------------------
+
+/**
+ * A "does this look nice" score, much lower priority than crossing count.
+ * Lower is better. Rewards two things:
+ *  - Connected beats sitting close together in Y (shorter, calmer edges
+ *    instead of a topologically-fine-but-wild zig-zag).
+ *  - Nodes *not* grazing an unrelated edge that passes near their Y at their
+ *    own X (a near-miss reads as messy even when it's not a true crossing).
+ * This never runs in a way that trades away crossing count — callers only
+ * accept a candidate ranking here if the real crossing count is unchanged.
+ */
+function aestheticCost(edges: Edge[], nodes: Node[], spread: RankMap): number {
+  let cost = 0
+
+  for (const e of edges) {
+    const dy = spread[e.node_1.name] - spread[e.node_2.name]
+    cost += dy * dy
+  }
+
+  for (const node of nodes) {
+    for (const e of edges) {
+      if (e.node_1.name === node.name || e.node_2.name === node.name) continue
+      const [xa, xb] = xRange(e)
+      if (node.x_coord <= xa || node.x_coord >= xb) continue
+      const y = yAt(
+        spread[e.node_1.name], spread[e.node_2.name],
+        e.node_1.x_coord, e.node_2.x_coord, node.x_coord
+      )
+      const dy = y - spread[node.name]
+      const graze = Math.max(0, 3 - Math.abs(dy)) // only "close calls" within ~3 lanes count
+      cost += graze * graze * 4 // weighted higher — a graze reads worse than plain length
+    }
+  }
+
+  return cost
+}
+
+function refineAesthetics(
+  ranks: RankMap,
+  realEdges: Edge[],
+  nodes: Node[],
+  allEdges: Edge[],
+  pairs: [number, number][],
+  nLanes: number,
+  maxCrossings: number,
+  deadline: number
+): RankMap {
+  const names = Object.keys(ranks)
+  let bestRanks = { ...ranks }
+  let bestSpread = ranksToSpread(bestRanks, nLanes)
+  let bestCost = aestheticCost(realEdges, nodes, bestSpread)
+
+  let improved = true
+  while (improved && Date.now() / 1000 < deadline) {
+    improved = false
+    for (let i = 0; i < names.length; i++) {
+      if (Date.now() / 1000 >= deadline) break
+      for (let j = i + 1; j < names.length; j++) {
+        const na = names[i], nb = names[j]
+        if (bestRanks[na] === bestRanks[nb]) continue
+
+        const candidate = { ...bestRanks, [na]: bestRanks[nb], [nb]: bestRanks[na] }
+        const candSpread = ranksToSpread(candidate, nLanes)
+
+        const crossings = countCrossingsForPairs(allEdges, pairs, candSpread)
+        if (crossings > maxCrossings) continue // never sacrifice crossing quality
+
+        const cost = aestheticCost(realEdges, nodes, candSpread)
+        if (cost < bestCost - 1e-9) {
+          bestRanks = candidate
+          bestSpread = candSpread
+          bestCost = cost
+          improved = true
+        }
+      }
+    }
+  }
+  return bestRanks
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -377,29 +531,43 @@ export function assignLanes(
   }
 
   const nodeNames = nodes.map(n => n.name)
-  const pairs = overlappingPairs(edges)
-  if (pairs.length === 0) return // No edges can possibly cross
 
-  const { nodePairIdx } = buildIndices(edges, nodeNames, pairs)
+  // Real edges plus one zero-width "self edge" per node — see selfEdge() for
+  // why. All three search phases just operate on generic edges/pairs, so
+  // folding these in here is enough to make every phase avoid node
+  // pass-throughs too, with no other changes needed below.
+  const allEdges = [...edges, ...nodes.map(selfEdge)]
 
-  // Sort by degree descending for tighter early bounds
+  const pairs = overlappingPairs(allEdges)
+  if (pairs.length === 0) return // Nothing can possibly cross or graze
+
+  const { nodePairIdx } = buildIndices(allEdges, nodeNames, pairs)
+
+  // Sort by degree descending (based on *real* edges only) for tighter early bounds
   const degree: Record<string, number> = Object.fromEntries(nodeNames.map(n => [n, 0]))
   for (const e of edges) { degree[e.node_1.name]++; degree[e.node_2.name]++ }
   const order = [...nodeNames].sort((a, b) => degree[b] - degree[a])
 
   // Phase 1: Greedy
-  let { ranks, crossings } = greedy(order, edges, pairs, nodePairIdx, nLanes)
-  if (crossings === 0) { applyRanks(nodes, ranks, nLanes); return }
+  let { ranks, crossings } = greedy(order, allEdges, pairs, nodePairIdx, nLanes)
 
-  // Phase 2: Local search (up to 50% of budget)
-  const lsDeadline = Math.min(start + timeoutSeconds * 0.5, deadline)
-  const ls = localSearch(ranks, edges, pairs, nodePairIdx, nLanes, lsDeadline)
-  if (ls.crossings < crossings) { ranks = ls.ranks; crossings = ls.crossings }
-  if (crossings === 0) { applyRanks(nodes, ranks, nLanes); return }
+  // Phase 2: Local search (up to 40% of budget)
+  if (crossings > 0) {
+    const lsDeadline = Math.min(start + timeoutSeconds * 0.4, deadline)
+    const ls = localSearch(ranks, allEdges, pairs, nodePairIdx, nLanes, lsDeadline)
+    if (ls.crossings < crossings) { ranks = ls.ranks; crossings = ls.crossings }
+  }
 
-  // Phase 3: Branch-and-bound
-  const bb = branchAndBound(order, edges, pairs, nLanes, crossings, deadline)
-  if (bb.ranks && bb.crossings < crossings) { ranks = bb.ranks }
+  // Phase 3: Branch-and-bound (up to 80% of budget, leaving room for phase 4)
+  if (crossings > 0) {
+    const bbDeadline = Math.min(start + timeoutSeconds * 0.8, deadline)
+    const bb = branchAndBound(order, allEdges, pairs, nLanes, crossings, bbDeadline)
+    if (bb.ranks && bb.crossings < crossings) { ranks = bb.ranks; crossings = bb.crossings }
+  }
+
+  // Phase 4: among solutions at this crossing count, prefer the nicer-looking
+  // one. Strictly a tie-break — it can never make crossings worse.
+  ranks = refineAesthetics(ranks, edges, nodes, allEdges, pairs, nLanes, crossings, deadline)
 
   applyRanks(nodes, ranks, nLanes)
 }
