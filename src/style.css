@@ -35,6 +35,18 @@ body {
 .board-content {
   position: relative;
   min-height: 100%;
+  display: flex; /* Helps align the pseudo-element properly */
+  flex-direction: column;
+}
+
+/* Creates a reliable padding zone below the lowest absolute-positioned beat */
+.board-content::after {
+  content: "";
+  display: block;
+  margin-top: auto; /* Pushes the padding buffer to the very bottom */
+  height: 60px;     /* Adjust this value to change the amount of padding/breathing room */
+  flex-shrink: 0;
+  pointer-events: none;
 }
 
 .board-svg {
