@@ -11,9 +11,13 @@ const characters  = ref<Character[]>([])
 const beats       = ref<Beat[]>([])
 const trashed     = ref<Beat[]>([])
 const activeId    = ref<string | null>(null)
-const newTitle    = ref('')
 const newCharName = ref('')
 const charToAdd   = ref('')
+const modalNewCharName = ref('')
+
+// Modal states
+const isModalOpen = ref(false)
+const isTrashModalOpen = ref(false)
 
 const boardEl   = ref<HTMLElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -27,13 +31,6 @@ const COLOR_PALETTE = ['#8b5cf6', '#ec4899', '#06b6d4', '#14b8a6', '#f97316', '#
 const { request: requestLayout, dispose } = useLayoutWorker(beats, characters)
 onUnmounted(dispose)
 
-// What the layout actually depends on: each beat's x position and which
-// characters touch it, plus which characters exist at all. Deliberately
-// excludes `y` (the worker's own output), `title`, `details`, and
-// `importance` — none of those affect the layout, and watching `y` in
-// particular would mean the worker re-triggering itself on every result it
-// writes back (flapping / a feedback loop). Sorted so re-ordering the
-// underlying arrays doesn't spuriously re-trigger this either.
 const layoutSignature = computed(() =>
   beats.value
     .map(b => `${b.id}:${Math.round(b.x)}:${[...b.characters].sort().join(',')}`)
@@ -46,8 +43,6 @@ const layoutSignature = computed(() =>
 let debounce: ReturnType<typeof setTimeout> | null = null
 watch(layoutSignature, (_new, old) => {
   if (debounce) clearTimeout(debounce)
-  // Run immediately on first load (old === undefined); debounce afterwards
-  // so dragging a node doesn't hammer the worker every frame.
   const delay = old === undefined ? 0 : 300
   debounce = setTimeout(() => {
     requestLayout(boardEl.value?.clientHeight ?? 600)
@@ -79,9 +74,6 @@ const renderedNodes = computed<RenderedNode[]>(() => {
     }))
 })
 
-// One straight segment per pair of adjacent beats. If more than one
-// character makes that same hop, we merge them into a single entry so the
-// template can draw one checkered line instead of several stacked ones.
 const computedSegments = computed<RenderedSegment[]>(() => {
   const segMap = new Map<string, { from: RenderedNode; to: RenderedNode; colors: string[] }>()
 
@@ -107,13 +99,12 @@ const computedSegments = computed<RenderedSegment[]>(() => {
   }))
 })
 
-// Dash length (px) used for the checkered pattern on multi-character segments.
 const DASH = 10
 
 const contentWidth = computed(() => {
   if (!renderedNodes.value.length) return '100%'
   const maxX = Math.max(...renderedNodes.value.map(n => n.x))
-  return `max(100%, ${maxX + 600}px)` // Automatically extends 600px past the furthest node
+  return `max(100%, ${maxX + 600}px)`
 })
 
 const gridLineCount = computed(() => {
@@ -132,22 +123,37 @@ function nodeGradient(node: RenderedNode): string {
 }
 
 // ---------------------------------------------------------------------------
-// Beat actions
+// Actions & Modals
 // ---------------------------------------------------------------------------
 
 function addBeat() {
-  if (!newTitle.value.trim()) return
   const id = crypto.randomUUID()
-  beats.value.push({ id, x: 180, title: newTitle.value.trim(), characters: [], importance: 3, details: '' })
+  const canvasCenter = (boardEl.value?.clientWidth ?? 800) / 2
+  const startX = renderedNodes.value.length ? Math.max(...renderedNodes.value.map(n => n.x)) + 120 : canvasCenter
+
+  beats.value.push({ id, x: startX, title: 'New Plot Beat', characters: [], importance: 3, details: '' })
   activeId.value = id
-  newTitle.value = ''
+  isModalOpen.value = true
 }
 
-function deleteBeat(id: string) {
-  const idx = beats.value.findIndex(b => b.id === id)
-  if (idx === -1) return
-  trashed.value.push(...beats.value.splice(idx, 1))
-  if (activeId.value === id) activeId.value = beats.value[0]?.id ?? null
+function openModal(id: string) {
+  activeId.value = id
+  isModalOpen.value = true
+}
+
+function closeModal() {
+  isModalOpen.value = false
+}
+
+function deleteActiveBeat() {
+  if (!activeBeat.value) return
+  const idx = beats.value.findIndex(b => b.id === activeBeat.value!.id)
+  if (idx !== -1) {
+    // Send to trash instead of completely deleting
+    trashed.value.push(beats.value[idx])
+    beats.value.splice(idx, 1)
+  }
+  closeModal()
 }
 
 function restoreBeat(id: string) {
@@ -155,7 +161,6 @@ function restoreBeat(id: string) {
   if (idx === -1) return
   const [beat] = trashed.value.splice(idx, 1)
   beats.value.push(beat)
-  activeId.value = beat.id
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +172,6 @@ function addGlobalChar() {
   if (!name || charNames.value.includes(name)) return
   const color = COLOR_PALETTE[characters.value.length % COLOR_PALETTE.length]
   characters.value.push({ name, color })
-  if (activeBeat.value) activeBeat.value.characters.push(name)
   newCharName.value = ''
 }
 
@@ -183,20 +187,38 @@ function removeCharFromBeat(name: string) {
   }
 }
 
+function createAndAddCharInModal() {
+  const name = modalNewCharName.value.trim()
+  if (!name || !activeBeat.value) return
+
+  if (!charNames.value.includes(name)) {
+    const color = COLOR_PALETTE[characters.value.length % COLOR_PALETTE.length]
+    characters.value.push({ name, color })
+  }
+  
+  if (!activeBeat.value.characters.includes(name)) {
+    activeBeat.value.characters.push(name)
+  }
+  modalNewCharName.value = ''
+}
+
 // ---------------------------------------------------------------------------
 // Drag
 // ---------------------------------------------------------------------------
 
 const drag = ref<{ id: string; startX: number; startNodeX: number } | null>(null)
+let dragDistance = 0 
 
-// Helper to pull the X coordinate from either a mouse or a touch event
 function getClientX(e: MouseEvent | TouchEvent) {
   return 'touches' in e ? e.touches[0].clientX : e.clientX
 }
 
 function startDrag(e: MouseEvent | TouchEvent, id: string) {
   const beat = beats.value.find(b => b.id === id)
-  if (beat) drag.value = { id, startX: getClientX(e), startNodeX: beat.x }
+  if (beat) {
+    drag.value = { id, startX: getClientX(e), startNodeX: beat.x }
+    dragDistance = 0
+  }
 }
 
 function onDrag(e: MouseEvent | TouchEvent) {
@@ -204,16 +226,21 @@ function onDrag(e: MouseEvent | TouchEvent) {
   const beat = beats.value.find(b => b.id === drag.value!.id)
   if (!beat) return
 
-  // Prevent default scroll behavior while actively dragging a node
   if (e.cancelable) e.preventDefault()
 
-  const newX = drag.value.startNodeX + getClientX(e) - drag.value.startX
-
-  // Bound to the left side (30px), but infinite to the right
+  const currentX = getClientX(e)
+  dragDistance = Math.abs(currentX - drag.value.startX)
+  
+  const newX = drag.value.startNodeX + currentX - drag.value.startX
   beat.x = Math.max(30, newX)
 }
 
 function endDrag() { drag.value = null }
+
+function handleNodeClick(id: string) {
+  if (dragDistance > 5) return
+  openModal(id)
+}
 
 // ---------------------------------------------------------------------------
 // Import / Export
@@ -242,6 +269,7 @@ function onImport(e: Event) {
       if (parsed.characters && parsed.beats) {
         characters.value = parsed.characters
         beats.value = parsed.beats
+        trashed.value = [] // Reset trash on import
         activeId.value = beats.value[0]?.id ?? null
       } else {
         alert('Invalid export format.')
@@ -256,19 +284,45 @@ function onImport(e: Event) {
 </script>
 
 <template>
-  <div class="header">
-    <div>
-      <h1>RamenFlux</h1>
-      <p>Drag nodes horizontally. Connect characters across beats.</p>
-    </div>
-    <div class="header-actions">
-      <button class="btn-io" @click="exportData">📤 Export JSON</button>
-      <button class="btn-io" @click="importClick">📥 Import JSON</button>
-      <input ref="fileInput" type="file" accept=".json" style="display:none" @change="onImport" />
-    </div>
-  </div>
-
   <div class="layout">
+    
+    <aside class="panel">
+      <div class="brand-header">
+        <h1>RamenFlux</h1>
+        <img src="https://placehold.co/100x100/1e293b/ffffff?text=RF" alt="Logo" class="brand-logo" />
+      </div>
+      <p class="brand-subtitle">Drag plot-beats side to side. Track characters across beats.</p>
+
+      <button class="btn-action btn-green" @click="addBeat">➕ Add plot beat</button>
+
+      <section class="card char-section">
+        <h4>👥 Characters</h4>
+        <div class="char-list">
+          <div v-for="c in characters" :key="c.name" class="char-entry">
+            <input
+              type="color"
+              :value="c.color"
+              @input="c.color = ($event.target as HTMLInputElement).value"
+              class="char-color-picker"
+            />
+            <span>{{ c.name }}</span>
+          </div>
+          <p v-if="!characters.length" class="muted" style="margin-bottom:8px">No characters yet.</p>
+        </div>
+        
+        <div class="divider" />
+        <input type="text" v-model="newCharName" placeholder="New character name" @keyup.enter="addGlobalChar" />
+        <button class="btn-action btn-slate" @click="addGlobalChar">Register</button>
+      </section>
+
+      <div class="panel-bottom">
+        <button class="btn-io" @click="isTrashModalOpen = true">🗑️ View Trash</button>
+        <button class="btn-io" @click="exportData">📤 Export JSON</button>
+        <button class="btn-io" @click="importClick">📥 Import JSON</button>
+        <input ref="fileInput" type="file" accept="application/json,.json,text/plain" style="display:none" @change="onImport" />
+      </div>
+    </aside>
+
     <div
       ref="boardEl"
       class="board"
@@ -291,9 +345,6 @@ function onImport(e: Event) {
             stroke="#f1f5f9" stroke-width="1"
           />
 
-          <!-- Straight lines only. A hop shared by several characters is
-               drawn once, as a single checkered/striped line, rather than as
-               several offset, overlapping curves. -->
           <template v-for="seg in computedSegments" :key="seg.key">
             <line
               v-for="(color, idx) in seg.colors" :key="idx"
@@ -320,82 +371,102 @@ function onImport(e: Event) {
           }"
           @mousedown="startDrag($event, node.id)"
           @touchstart="startDrag($event, node.id)"
-          @click.stop="activeId = node.id"
+          @click.stop="handleNodeClick(node.id)"
         >
           <span class="node-label">{{ node.title }}</span>
         </div>
       </div>
     </div>
-    
-    <!-- Side panel -->
-    <aside class="panel">
+  </div>
 
-      <!-- Add beat -->
-      <section class="card">
-        <h4>New Node</h4>
-        <input v-model="newTitle" placeholder="Node title..." @keyup.enter="addBeat" />
-        <button class="btn-action" @click="addBeat">Add to Board</button>
-      </section>
+  <div v-if="isModalOpen" class="modal-overlay" @mousedown.self="closeModal">
+    <div class="modal-content" v-if="activeBeat">
+      <div class="modal-header">
+        <h3>Edit Plot Beat</h3>
+        <button class="btn-icon" @click="closeModal">✖</button>
+      </div>
 
-      <!-- Active beat editor -->
-      <section v-if="activeBeat" class="card">
-        <div class="card-header">
-          <div>
-            <span class="label-tag">Active Node</span>
-            <h3>{{ activeBeat.title }}</h3>
-          </div>
-          <button class="btn-icon" title="Delete node" @click="deleteBeat(activeBeat.id)">🗑️</button>
-        </div>
-
-        <label class="field-label">Importance</label>
-        <input type="range" min="1" max="5" step="1" v-model.number="activeBeat.importance" />
-        <div class="range-labels">
-          <span>Less</span><span>More</span>
-        </div>
+      <div class="modal-body">
+        <h5 style="margin-bottom: 8px;">General</h5>
+        <label class="field-label">Beat Name</label>
+        <input type="text" v-model="activeBeat.title" placeholder="e.g. The Bank Heist" />
 
         <label class="field-label" style="margin-top:12px">Details</label>
-        <textarea v-model="activeBeat.details" placeholder="Scene notes, location, context…" />
+        <textarea v-model="activeBeat.details" placeholder="Scene details, location, context, etc…" />
 
-        <h5>Characters present</h5>
-        <p v-if="!activeBeat.characters.length" class="muted">None yet.</p>
-        <div v-for="name in activeBeat.characters" :key="name" class="char-row">
-          <span>{{ name }}</span>
-          <button class="btn-icon" @click="removeCharFromBeat(name)">❌</button>
+        <div class="divider" />
+        
+        <h5 style="margin-bottom: 8px;">Characters present</h5>
+        <div class="active-chars">
+          <p v-if="!activeBeat.characters.length" class="muted">None yet.</p>
+          <div v-for="name in activeBeat.characters" :key="name" class="char-row">
+            <span>{{ name }}</span>
+            <button class="btn-icon" @click="removeCharFromBeat(name)">❌</button>
+          </div>
         </div>
 
-        <select v-if="availableChars.length" v-model="charToAdd" @change="addCharToBeat" style="margin-top:8px">
-          <option value="" disabled selected>➕ Add character…</option>
-          <option v-for="c in availableChars" :key="c" :value="c">{{ c }}</option>
-        </select>
-      </section>
+        <div class="add-char-tools">
+          <select v-if="availableChars.length" v-model="charToAdd" @change="addCharToBeat">
+            <option value="" disabled selected>➕ Add existing character…</option>
+            <option v-for="c in availableChars" :key="c" :value="c">{{ c }}</option>
+          </select>
+          
+          <div class="new-char-inline">
+            <input type="text" v-model="modalNewCharName" placeholder="Or create a brand new character..." @keyup.enter="createAndAddCharInModal" />
+            <button class="btn-io" @click="createAndAddCharInModal">Add</button>
+          </div>
+        </div>
 
-      <!-- Trash -->
-      <section class="card">
-        <h4>🗑️ Trash</h4>
-        <p v-if="!trashed.length" class="muted">Empty.</p>
+        <div class="divider" />
+
+        <div style="display:flex; gap: 16px;">
+          <div style="flex: 2;">
+            <h5 style="margin-bottom: 8px;">Importance</h5>
+            <input type="range" min="1" max="5" step="1" v-model.number="activeBeat.importance" />
+            <div class="range-labels">
+              <span>Less</span><span>More</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="divider" />
+
+        <div style="display:flex; gap: 16px;">
+          <div style="flex: 1;">
+            <label class="field-label">X-Coordinate</label>
+            <input type="number" v-model.number="activeBeat.x" class="num-input" />
+          </div>
+        </div>
+
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-io text-danger" @click="deleteActiveBeat">🗑️ Delete Beat</button>
+        <button class="btn-action" style="width: auto; padding: 8px 24px;" @click="closeModal">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="isTrashModalOpen" class="modal-overlay" @mousedown.self="isTrashModalOpen = false">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Trash Bin</h3>
+        <button class="btn-icon" @click="isTrashModalOpen = false">✖</button>
+      </div>
+      
+      <div class="modal-body">
+        <p v-if="!trashed.length" class="muted" style="text-align: center; padding: 20px 0;">
+          Trash is empty.
+        </p>
         <div v-for="b in trashed" :key="b.id" class="trash-row">
           <span class="trash-title">{{ b.title }}</span>
           <button class="btn-restore" @click="restoreBeat(b.id)">↩️ Restore</button>
         </div>
-      </section>
+      </div>
 
-      <!-- Character registry -->
-      <section class="card">
-        <h4>👥 Characters</h4>
-        <div v-for="c in characters" :key="c.name" class="char-entry">
-          <input
-            type="color"
-            :value="c.color"
-            @input="c.color = ($event.target as HTMLInputElement).value"
-            style="width:22px;height:22px;border:none;border-radius:50%;padding:0;cursor:pointer;background:none;flex-shrink:0;"
-          />
-          <span>{{ c.name }}</span>
-        </div>
-        <div class="divider" />
-        <input v-model="newCharName" placeholder="New character name" />
-        <button class="btn-action" style="background:#475569" @click="addGlobalChar">Register</button>
-      </section>
-
-    </aside>
+      <div class="modal-footer" style="justify-content: flex-end;">
+        <button class="btn-action" style="width: auto; padding: 8px 24px;" @click="isTrashModalOpen = false">Close</button>
+      </div>
+    </div>
   </div>
 </template>
