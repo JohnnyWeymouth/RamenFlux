@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from 'vue'
 import { useLayoutWorker } from './useLayoutWorker'
-import type { Beat, Character, RenderedNode, ComputedPath } from './types'
+import type { Beat, Character, RenderedNode, RenderedSegment } from './types'
 
 // ---------------------------------------------------------------------------
 // State
@@ -27,13 +27,32 @@ const COLOR_PALETTE = ['#8b5cf6', '#ec4899', '#06b6d4', '#14b8a6', '#f97316', '#
 const { request: requestLayout, dispose } = useLayoutWorker(beats, characters)
 onUnmounted(dispose)
 
+// What the layout actually depends on: each beat's x position and which
+// characters touch it, plus which characters exist at all. Deliberately
+// excludes `y` (the worker's own output), `title`, `details`, and
+// `importance` — none of those affect the layout, and watching `y` in
+// particular would mean the worker re-triggering itself on every result it
+// writes back (flapping / a feedback loop). Sorted so re-ordering the
+// underlying arrays doesn't spuriously re-trigger this either.
+const layoutSignature = computed(() =>
+  beats.value
+    .map(b => `${b.id}:${Math.round(b.x)}:${[...b.characters].sort().join(',')}`)
+    .sort()
+    .join('|') +
+  '::' +
+  characters.value.map(c => c.name).sort().join(',')
+)
+
 let debounce: ReturnType<typeof setTimeout> | null = null
-watch([beats, characters], () => {
+watch(layoutSignature, (_new, old) => {
   if (debounce) clearTimeout(debounce)
+  // Run immediately on first load (old === undefined); debounce afterwards
+  // so dragging a node doesn't hammer the worker every frame.
+  const delay = old === undefined ? 0 : 300
   debounce = setTimeout(() => {
     requestLayout(boardEl.value?.clientHeight ?? 600)
-  }, 300)
-}, { deep: true })
+  }, delay)
+}, { immediate: true })
 
 // ---------------------------------------------------------------------------
 // Derived state
@@ -60,92 +79,36 @@ const renderedNodes = computed<RenderedNode[]>(() => {
     }))
 })
 
-const computedPaths = computed<ComputedPath[]>(() => {
-  // Map each character to their nodes in x-order
-  const charNodeMap = new Map<string, RenderedNode[]>()
+// One straight segment per pair of adjacent beats. If more than one
+// character makes that same hop, we merge them into a single entry so the
+// template can draw one checkered line instead of several stacked ones.
+const computedSegments = computed<RenderedSegment[]>(() => {
+  const segMap = new Map<string, { from: RenderedNode; to: RenderedNode; colors: string[] }>()
+
   for (const char of characters.value) {
-    charNodeMap.set(
-      char.name,
-      renderedNodes.value.filter(n => n.characters.includes(char.name)).sort((a, b) => a.x - b.x)
-    )
+    const charNodes = renderedNodes.value
+      .filter(n => n.characters.includes(char.name))
+      .sort((a, b) => a.x - b.x)
+
+    for (let i = 0; i < charNodes.length - 1; i++) {
+      const from = charNodes[i]
+      const to = charNodes[i + 1]
+      const key = `${from.id}->${to.id}`
+      if (!segMap.has(key)) segMap.set(key, { from, to, colors: [] })
+      segMap.get(key)!.colors.push(char.color)
+    }
   }
 
-  // Build consistent per-segment ordering so color bands never cross.
-  // For each directed segment (prevNode → currNode), sort shared characters
-  const charOrderAt = new Map<string, string[]>()
-  const sortedNodes = [...renderedNodes.value].sort((a, b) => a.x - b.x)
-
-  for (const node of sortedNodes) {
-    const charsHere = node.characters
-
-    const scoreOf: Record<string, number> = {}
-    for (const charName of charsHere) {
-      const charNodes = charNodeMap.get(charName) ?? []
-      const idx = charNodes.findIndex(n => n.id === node.id)
-
-      // Incoming y: effective y of this character at its previous node
-      let inY: number | null = null
-      if (idx > 0) {
-        const prevNode = charNodes[idx - 1]
-        const prevOrder = charOrderAt.get(prevNode.id) ?? [...prevNode.characters]
-        const pi = prevOrder.indexOf(charName)
-        const prevOff = prevOrder.length > 1 ? (pi - (prevOrder.length - 1) / 2) * 8 : 0
-        inY = prevNode.y + prevOff
-      }
-
-      // Outgoing y: raw y of the next node (not yet ordered, so use node.y as best estimate)
-      let outY: number | null = null
-      if (idx < charNodes.length - 1) {
-        outY = charNodes[idx + 1].y
-      }
-
-      // Average whatever signals we have; fall back to current node y
-      if (inY !== null && outY !== null) scoreOf[charName] = (inY + outY) / 2
-      else if (inY !== null) scoreOf[charName] = inY
-      else if (outY !== null) scoreOf[charName] = outY
-      else scoreOf[charName] = node.y
-    }
-
-    // Sort by score; tiebreak by color string for determinism
-    const sorted = [...charsHere].sort((a, b) => {
-      const diff = scoreOf[a] - scoreOf[b]
-      if (Math.abs(diff) > 0.001) return diff
-      const colA = characters.value.find(c => c.name === a)?.color ?? a
-      const colB = characters.value.find(c => c.name === b)?.color ?? b
-      return colA < colB ? -1 : colA > colB ? 1 : 0
-    })
-    charOrderAt.set(node.id, sorted)
-  }
-
-  return characters.value.flatMap(char => {
-    const nodes = charNodeMap.get(char.name) ?? []
-    if (nodes.length < 1) return []
-
-    let d = ''
-    for (let i = 0; i < nodes.length; i++) {
-      const curr = nodes[i]
-      const order = charOrderAt.get(curr.id)!
-      const charIdx = order.indexOf(char.name)
-      const yOffset = order.length > 1 ? (charIdx - (order.length - 1) / 2) * 8 : 0
-      const tx = curr.x, ty = curr.y + yOffset
-
-      if (i === 0) {
-        d += `M ${tx} ${ty}`
-      } else {
-        const prev = nodes[i - 1]
-        const prevOrder = charOrderAt.get(prev.id)!
-        const prevIdx = prevOrder.indexOf(char.name)
-        const prevOffset = prevOrder.length > 1 ? (prevIdx - (prevOrder.length - 1) / 2) * 8 : 0
-        const sx = prev.x, sy = prev.y + prevOffset
-        const tension = 0.15
-        const cp1x = sx + (tx - sx) * tension
-        const cp2x = tx - (tx - sx) * tension
-        d += ` C ${cp1x} ${sy}, ${cp2x} ${ty}, ${tx} ${ty}`
-      }
-    }
-    return [{ character: char.name, d, color: char.color }]
-  })
+  return Array.from(segMap.entries()).map(([key, seg]) => ({
+    key,
+    x1: seg.from.x, y1: seg.from.y,
+    x2: seg.to.x,   y2: seg.to.y,
+    colors: seg.colors,
+  }))
 })
+
+// Dash length (px) used for the checkered pattern on multi-character segments.
+const DASH = 10
 
 const contentWidth = computed(() => {
   if (!renderedNodes.value.length) return '100%'
@@ -245,7 +208,7 @@ function onDrag(e: MouseEvent | TouchEvent) {
   if (e.cancelable) e.preventDefault()
 
   const newX = drag.value.startNodeX + getClientX(e) - drag.value.startX
-  
+
   // Bound to the left side (30px), but infinite to the right
   beat.x = Math.max(30, newX)
 }
@@ -327,11 +290,21 @@ function onImport(e: Event) {
             :x1="i * 80" y1="0" :x2="i * 80" y2="100%"
             stroke="#f1f5f9" stroke-width="1"
           />
-          <path
-            v-for="path in computedPaths" :key="path.character"
-            :d="path.d" :stroke="path.color"
-            fill="none" stroke-width="2.5" stroke-linecap="round"
-          />
+
+          <!-- Straight lines only. A hop shared by several characters is
+               drawn once, as a single checkered/striped line, rather than as
+               several offset, overlapping curves. -->
+          <template v-for="seg in computedSegments" :key="seg.key">
+            <line
+              v-for="(color, idx) in seg.colors" :key="idx"
+              :x1="seg.x1" :y1="seg.y1" :x2="seg.x2" :y2="seg.y2"
+              :stroke="color"
+              stroke-width="2.5"
+              stroke-linecap="butt"
+              :stroke-dasharray="seg.colors.length > 1 ? `${DASH} ${DASH * (seg.colors.length - 1)}` : undefined"
+              :stroke-dashoffset="seg.colors.length > 1 ? -DASH * idx : undefined"
+            />
+          </template>
         </svg>
 
         <div

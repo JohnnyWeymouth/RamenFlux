@@ -1,18 +1,29 @@
 // layout.worker.ts
 // Runs the crossing-minimization algorithm off the main thread.
 
-import { assignLanes, overlappingPairs, edgesCross, type Node, type Edge } from './crossing_minimizer'
+import { assignLanes, countCrossings, type Node, type Edge } from './crossing_minimizer'
 import type { WorkerInput, WorkerOutput } from './types'
 
 const N_LANES = 1000
 const TIMEOUT = 2 // seconds per optimization run
 
-function countCrossings(edges: Edge[], nodes: Node[]): number {
-  const laneMap: Record<string, number> = {}
-  for (const n of nodes) laneMap[n.name] = n.y_coord
+function laneMapOf(nodes: Node[]): Record<string, number> {
+  const m: Record<string, number> = {}
+  for (const n of nodes) m[n.name] = n.y_coord
+  return m
+}
 
-  const pairs = overlappingPairs(edges)
-  return pairs.filter(([i, j]) => edgesCross(edges[i], edges[j], laneMap)).length
+// Secondary, much-lower-priority "does this look nice" score used only to
+// decide whether a same-crossing-count layout is worth swapping to. Mirrors
+// the edge-length term inside crossing_minimizer's own aesthetic phase.
+function spreadCost(edges: Edge[], nodes: Node[]): number {
+  const lane = laneMapOf(nodes)
+  let cost = 0
+  for (const e of edges) {
+    const dy = lane[e.node_1.name] - lane[e.node_2.name]
+    cost += dy * dy
+  }
+  return cost
 }
 
 self.onmessage = (event: MessageEvent<WorkerInput>) => {
@@ -38,7 +49,8 @@ self.onmessage = (event: MessageEvent<WorkerInput>) => {
     }
   }
 
-  const baselineCrossings = countCrossings(edges, nodes)
+  const baselineCrossings = countCrossings(edges, nodes, laneMapOf(nodes))
+  const baselineSpreadCost = spreadCost(edges, nodes)
 
   try {
     assignLanes(nodes, edges, N_LANES, TIMEOUT)
@@ -49,11 +61,23 @@ self.onmessage = (event: MessageEvent<WorkerInput>) => {
     return
   }
 
-  const newCrossings = countCrossings(edges, nodes)
+  const newCrossings = countCrossings(edges, nodes, laneMapOf(nodes))
+  const newSpreadCost = spreadCost(edges, nodes)
 
-  // Only apply if strictly better, or if Y values were never assigned
   const neverHadY = beats[0] && beats[0].y == null
-  if (newCrossings < baselineCrossings || neverHadY) {
+
+  // Apply the new layout when it strictly reduces crossings, or — with
+  // crossings unchanged — when it meaningfully tidies up the same
+  // topological solution. That relative threshold (5%) is what keeps small,
+  // noisy differences (e.g. re-running mid-drag) from re-shuffling beats
+  // that already look fine — i.e. avoids flapping.
+  const fewerCrossings = newCrossings < baselineCrossings
+  const sameCrossingsButTidier =
+    newCrossings === baselineCrossings &&
+    baselineSpreadCost > 0 &&
+    newSpreadCost < baselineSpreadCost * 0.95
+
+  if (fewerCrossings || sameCrossingsButTidier || neverHadY) {
     const marginY = 60
     const usable = canvasHeight - marginY * 2
     const layout: Record<string, number> = {}

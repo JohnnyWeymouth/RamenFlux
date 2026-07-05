@@ -18,10 +18,17 @@ export interface RenderedNode extends Beat {
   radius: number
 }
 
-export interface ComputedPath {
-  character: string
-  d: string
-  color: string
+// One straight line between two adjacent beats. `colors` holds one entry per
+// character that travels this exact node-to-node hop — when there's more
+// than one, the line is drawn as a single checkered/striped segment instead
+// of several overlapping lines.
+export interface RenderedSegment {
+  key: string
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+  colors: string[]
 }
 
 // Messages sent to the layout worker
