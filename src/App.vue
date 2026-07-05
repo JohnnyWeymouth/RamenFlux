@@ -294,6 +294,10 @@ function onImport(e: Event) {
       <p class="brand-subtitle">Drag plot-beats side to side. Track characters across beats.</p>
 
       <button class="btn-action btn-green" @click="addBeat">➕ Add plot beat</button>
+      <button class="btn-io" @click="isTrashModalOpen = true">🗑️ View Trash</button>
+      <button class="btn-io" @click="exportData">📤 Export JSON</button>
+      <button class="btn-io" @click="importClick">📥 Import JSON</button>
+      <input ref="fileInput" type="file" accept="application/json,.json,text/plain" style="display:none" @change="onImport" />
 
       <section class="card char-section">
         <h4>👥 Characters</h4>
@@ -315,12 +319,6 @@ function onImport(e: Event) {
         <button class="btn-action btn-slate" @click="addGlobalChar">Register</button>
       </section>
 
-      <div class="panel-bottom">
-        <button class="btn-io" @click="isTrashModalOpen = true">🗑️ View Trash</button>
-        <button class="btn-io" @click="exportData">📤 Export JSON</button>
-        <button class="btn-io" @click="importClick">📥 Import JSON</button>
-        <input ref="fileInput" type="file" accept="application/json,.json,text/plain" style="display:none" @change="onImport" />
-      </div>
     </aside>
 
     <div
