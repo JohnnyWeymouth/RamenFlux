@@ -154,12 +154,23 @@ function nodeGradient(node: RenderedNode): string {
 // Actions & Modals
 // ---------------------------------------------------------------------------
 
-function addBeat() {
+function addBeat(event: MouseEvent) {
   const id = crypto.randomUUID()
-  const canvasCenter = (boardEl.value?.clientWidth ?? 800) / 2
-  const startX = renderedNodes.value.length ? Math.max(...renderedNodes.value.map(n => n.x)) + 120 : canvasCenter
 
-  beats.value.push({ id, x: startX, title: 'New Plot Beat', characters: [], importance: 3, details: '' })
+  const target = event.currentTarget as HTMLElement
+  const rect = target.getBoundingClientRect()
+
+  const startX = Math.max(30, event.clientX - rect.left + target.scrollLeft)
+
+  beats.value.push({
+    id,
+    x: startX,
+    title: 'New Plot Beat',
+    characters: [],
+    importance: 3,
+    details: ''
+  })
+
   activeId.value = id
   isModalOpen.value = true
 }
@@ -382,7 +393,7 @@ function onImport(e: Event) {
   <div class="layout">
     
     <button 
-      class="sidebar-toggle" 
+      class="sidebar-toggle"
       :class="{ 'is-collapsed': !isSidebarOpen }"
       @click="isSidebarOpen = !isSidebarOpen"
       title="Toggle sidebar"
@@ -398,7 +409,8 @@ function onImport(e: Event) {
 
       <p class="brand-subtitle">Drag plot-beats side to side. Track characters across beats.</p>
 
-      <button class="btn-action btn-green" @click="addBeat">➕ Add plot beat</button>
+      <div>➕ Double-click to add a Plot Beat</div>
+      <br>
 
       <button class="btn-io" @click="isTrashModalOpen = true">🗑️ View Trash</button>
 
@@ -437,6 +449,7 @@ function onImport(e: Event) {
       @touchmove="onDrag"
       @touchend="endDrag"
       @touchcancel="endDrag"
+      @dblclick="addBeat"
     >
       <div class="board-content" :style="{ minWidth: contentWidth }">
         <p v-if="!renderedNodes.length" class="board-empty">
