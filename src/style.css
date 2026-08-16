@@ -89,8 +89,41 @@ body {
 .node:active { cursor: grabbing; }
 
 .node.active {
-  background: #2563eb;
-  box-shadow: 0 0 0 3px rgba(37,99,235,0.35);
+  /* Increase ring thickness & add a high-contrast white inner separation border */
+  box-shadow: 
+    0 0 0 2px #ffffff, 
+    0 0 0 5px #2563eb, 
+    0 4px 12px rgba(37, 99, 235, 0.4);
+  
+  /* Make selected nodes scale slightly larger */
+  transform: translate(-50%, -50%) scale(1.18);
+  z-index: 5;
+}
+
+/* Optional pulse effect for high visibility */
+.node.active::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 2px solid #3b82f6;
+  animation: node-pulse 1.8s infinite ease-in-out;
+  pointer-events: none;
+}
+
+@keyframes node-pulse {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.8;
+  }
+  70% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
 }
 
 .node-label {
@@ -458,4 +491,12 @@ input[type="range"] { width: 100%; margin: 4px 0 2px; }
 
 .new-char-inline input {
   margin-bottom: 0;
+}
+
+.selection-box {
+  position: absolute;
+  border: 1px dashed #3b82f6;
+  background-color: rgba(59, 130, 246, 0.15);
+  pointer-events: none;
+  z-index: 20;
 }

@@ -10,7 +10,11 @@ import type { Beat, Character, RenderedNode, RenderedSegment } from './types'
 const characters  = ref<Character[]>([])
 const beats       = ref<Beat[]>([])
 const trashed     = ref<Beat[]>([])
-const activeId    = ref<string | null>(null)
+
+// Refactored Multi-selection State
+const selectedIds = ref<Set<string>>(new Set())
+const activeId    = ref<string | null>(null) // Primary beat focused in modal
+
 const newCharName = ref('')
 const charToAdd   = ref('')
 const modalNewCharName = ref('')
@@ -32,12 +36,102 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const COLOR_PALETTE = ['#8b5cf6', '#ec4899', '#06b6d4', '#14b8a6', '#f97316', '#ef4444', '#10b981']
 
 // ---------------------------------------------------------------------------
-// Layout worker
+// Selection Box State & Helpers
+// ---------------------------------------------------------------------------
+
+interface Rect {
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
+const selectionBox = ref<{ startX: number; startY: number; currentX: number; currentY: number } | null>(null)
+
+const selectionBoxStyle = computed(() => {
+  if (!selectionBox.value) return {}
+  const x = Math.min(selectionBox.value.startX, selectionBox.value.currentX)
+  const y = Math.min(selectionBox.value.startY, selectionBox.value.currentY)
+  const w = Math.abs(selectionBox.value.currentX - selectionBox.value.startX)
+  const h = Math.abs(selectionBox.value.currentY - selectionBox.value.startY)
+  return {
+    left: `${x}px`,
+    top: `${y}px`,
+    width: `${w}px`,
+    height: `${h}px`
+  }
+})
+
+function clearSelection() {
+  selectedIds.value.clear()
+}
+
+function selectNode(id: string, multi = false) {
+  if (multi) {
+    if (selectedIds.value.has(id)) {
+      selectedIds.value.delete(id)
+    } else {
+      selectedIds.value.add(id)
+    }
+  } else {
+    selectedIds.value = new Set([id])
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Command Pattern / Undo & Redo History
+// ---------------------------------------------------------------------------
+
+interface Command {
+  execute: () => void
+  undo: () => void
+}
+
+const historyStack = ref<Command[]>([])
+const redoStack = ref<Command[]>([])
+
+const canUndo = computed(() => historyStack.value.length > 0)
+const canRedo = computed(() => redoStack.value.length > 0)
+
+function executeCommand(cmd: Command) {
+  cmd.execute()
+  historyStack.value.push(cmd)
+  redoStack.value = []
+}
+
+function undo() {
+  const cmd = historyStack.value.pop()
+  if (cmd) {
+    cmd.undo()
+    redoStack.value.push(cmd)
+  }
+}
+
+function redo() {
+  const cmd = redoStack.value.pop()
+  if (cmd) {
+    cmd.execute()
+    historyStack.value.push(cmd)
+  }
+}
+
+function handleKeyDown(e: KeyboardEvent) {
+  if (e.metaKey || e.ctrlKey) {
+    if (e.key.toLowerCase() === 'z') {
+      if (e.shiftKey) redo()
+      else undo()
+    } else if (e.key.toLowerCase() === 'y') {
+      redo()
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Layout Worker & Derived State (Preserved)
 // ---------------------------------------------------------------------------
 
 const { request: requestLayout, dispose } = useLayoutWorker(beats, characters)
 
-// 1. Define the reactive signature first so it is available to the watcher
 const layoutSignature = computed(() =>
   beats.value
     .map(b => `${b.id}:${Math.round(b.x)}:${[...b.characters].sort().join(',')}`)
@@ -47,7 +141,6 @@ const layoutSignature = computed(() =>
   characters.value.map(c => c.name).sort().join(',')
 )
 
-// 2. Declare a single block-scoped debounce token variable
 let debounce: ReturnType<typeof setTimeout> | null = null
 
 const triggerLayoutRecalc = (delay = 300) => {
@@ -57,34 +150,28 @@ const triggerLayoutRecalc = (delay = 300) => {
   }, delay)
 }
 
-// 3. Watch the computed layout signature for state changes
 watch(layoutSignature, (_new, old) => {
   const delay = old === undefined ? 0 : 300
   triggerLayoutRecalc(delay)
 }, { immediate: true })
 
-// 4. Handle resize & orientation events cleanly
 const handleResize = () => triggerLayoutRecalc(150)
 
 onMounted(() => {
   window.addEventListener('resize', handleResize)
   window.addEventListener('orientationchange', handleResize)
+  window.addEventListener('keydown', handleKeyDown)
 })
 
 onUnmounted(() => {
   dispose()
   window.removeEventListener('resize', handleResize)
   window.removeEventListener('orientationchange', handleResize)
+  window.removeEventListener('keydown', handleKeyDown)
 })
 
-// ---------------------------------------------------------------------------
-// Derived state
-// ---------------------------------------------------------------------------
-
 const activeBeat = computed(() => beats.value.find(b => b.id === activeId.value))
-
 const charNames = computed(() => characters.value.map(c => c.name))
-
 const availableChars = computed(() =>
   activeBeat.value
     ? charNames.value.filter(n => !activeBeat.value!.characters.includes(n))
@@ -154,95 +241,175 @@ function nodeGradient(node: RenderedNode): string {
 // Actions & Modals
 // ---------------------------------------------------------------------------
 
-function addBeat(event: MouseEvent) {
-  const id = crypto.randomUUID()
+let activeBeatSnapshot: string | null = null
 
+function addBeat(event: MouseEvent) {
   const target = event.currentTarget as HTMLElement
   const rect = target.getBoundingClientRect()
-
   const startX = Math.max(30, event.clientX - rect.left + target.scrollLeft)
 
-  beats.value.push({
-    id,
+  const newBeat: Beat = {
+    id: crypto.randomUUID(),
     x: startX,
     title: 'New Plot Beat',
     characters: [],
     importance: 3,
     details: ''
+  }
+
+  executeCommand({
+    execute: () => beats.value.push(newBeat),
+    undo: () => {
+      beats.value = beats.value.filter(b => b.id !== newBeat.id)
+    }
   })
 
-  activeId.value = id
-  isModalOpen.value = true
+  openModal(newBeat.id)
 }
 
 function openModal(id: string) {
   activeId.value = id
+  const b = beats.value.find(beat => beat.id === id)
+  if (b) {
+    activeBeatSnapshot = JSON.stringify(b)
+  }
   isModalOpen.value = true
 }
 
 function closeModal() {
+  if (activeBeatSnapshot && activeId.value) {
+    const currentBeat = beats.value.find(b => b.id === activeId.value)
+    if (currentBeat) {
+      const beforeData = JSON.parse(activeBeatSnapshot)
+      const afterData = JSON.parse(JSON.stringify(currentBeat))
+
+      if (activeBeatSnapshot !== JSON.stringify(afterData)) {
+        const targetId = activeId.value
+        historyStack.value.push({
+          execute: () => {
+            const b = beats.value.find(beat => beat.id === targetId)
+            if (b) Object.assign(b, afterData)
+          },
+          undo: () => {
+            const b = beats.value.find(beat => beat.id === targetId)
+            if (b) Object.assign(b, beforeData)
+          }
+        })
+        redoStack.value = []
+      }
+    }
+  }
   isModalOpen.value = false
+  activeBeatSnapshot = null
 }
 
 function deleteActiveBeat() {
   if (!activeBeat.value) return
-  const idx = beats.value.findIndex(b => b.id === activeBeat.value!.id)
-  if (idx !== -1) {
-    trashed.value.push(beats.value[idx])
-    beats.value.splice(idx, 1)
-  }
+  const beatToDelete = activeBeat.value
+  const idx = beats.value.findIndex(b => b.id === beatToDelete.id)
+  if (idx === -1) return
+
+  executeCommand({
+    execute: () => {
+      const currentIdx = beats.value.findIndex(b => b.id === beatToDelete.id)
+      if (currentIdx !== -1) beats.value.splice(currentIdx, 1)
+      trashed.value.push(beatToDelete)
+    },
+    undo: () => {
+      trashed.value = trashed.value.filter(b => b.id !== beatToDelete.id)
+      beats.value.splice(idx, 0, beatToDelete)
+    }
+  })
+
   closeModal()
 }
 
 function restoreBeat(id: string) {
   const idx = trashed.value.findIndex(b => b.id === id)
   if (idx === -1) return
-  const [beat] = trashed.value.splice(idx, 1)
-  beats.value.push(beat)
+  const beatToRestore = trashed.value[idx]
+
+  executeCommand({
+    execute: () => {
+      const currentIdx = trashed.value.findIndex(b => b.id === id)
+      if (currentIdx !== -1) trashed.value.splice(currentIdx, 1)
+      beats.value.push(beatToRestore)
+    },
+    undo: () => {
+      beats.value = beats.value.filter(b => b.id !== id)
+      trashed.value.splice(idx, 0, beatToRestore)
+    }
+  })
 }
 
 // ---------------------------------------------------------------------------
-// Character actions
+// Character actions & Edits (Preserved)
 // ---------------------------------------------------------------------------
 
 function addGlobalChar() {
   const name = newCharName.value.trim()
   if (!name || charNames.value.includes(name)) return
   const color = COLOR_PALETTE[characters.value.length % COLOR_PALETTE.length]
-  characters.value.push({ name, color })
+  const newChar = { name, color }
+
+  executeCommand({
+    execute: () => characters.value.push(newChar),
+    undo: () => {
+      characters.value = characters.value.filter(c => c.name !== name)
+    }
+  })
   newCharName.value = ''
 }
 
 function addCharToBeat() {
   if (!charToAdd.value || !activeBeat.value) return
-  activeBeat.value.characters.push(charToAdd.value)
+  const charName = charToAdd.value
+  const targetBeat = activeBeat.value
+
+  executeCommand({
+    execute: () => targetBeat.characters.push(charName),
+    undo: () => {
+      targetBeat.characters = targetBeat.characters.filter(c => c !== charName)
+    }
+  })
   charToAdd.value = ''
 }
 
 function removeCharFromBeat(name: string) {
-  if (activeBeat.value) {
-    activeBeat.value.characters = activeBeat.value.characters.filter(c => c !== name)
-  }
+  if (!activeBeat.value) return
+  const targetBeat = activeBeat.value
+  const charIdx = targetBeat.characters.indexOf(name)
+
+  executeCommand({
+    execute: () => {
+      targetBeat.characters = targetBeat.characters.filter(c => c !== name)
+    },
+    undo: () => {
+      if (charIdx !== -1) targetBeat.characters.splice(charIdx, 0, name)
+    }
+  })
 }
 
 function createAndAddCharInModal() {
   const name = modalNewCharName.value.trim()
   if (!name || !activeBeat.value) return
 
-  if (!charNames.value.includes(name)) {
-    const color = COLOR_PALETTE[characters.value.length % COLOR_PALETTE.length]
-    characters.value.push({ name, color })
-  }
-  
-  if (!activeBeat.value.characters.includes(name)) {
-    activeBeat.value.characters.push(name)
-  }
+  const targetBeat = activeBeat.value
+  const isGlobalNew = !charNames.value.includes(name)
+  const color = COLOR_PALETTE[characters.value.length % COLOR_PALETTE.length]
+
+  executeCommand({
+    execute: () => {
+      if (isGlobalNew) characters.value.push({ name, color })
+      if (!targetBeat.characters.includes(name)) targetBeat.characters.push(name)
+    },
+    undo: () => {
+      targetBeat.characters = targetBeat.characters.filter(c => c !== name)
+      if (isGlobalNew) characters.value = characters.value.filter(c => c.name !== name)
+    }
+  })
   modalNewCharName.value = ''
 }
-
-// ---------------------------------------------------------------------------
-// Character Editing & Deletion
-// ---------------------------------------------------------------------------
 
 function openCharModal(char: Character) {
   activeCharName.value = char.name
@@ -258,33 +425,43 @@ function closeCharModal() {
 
 function saveCharacter() {
   if (!activeCharName.value) return
-  
   const newName = editCharName.value.trim()
   if (!newName) return
 
-  if (newName !== activeCharName.value && charNames.value.includes(newName)) {
+  const oldName = activeCharName.value
+  if (newName !== oldName && charNames.value.includes(newName)) {
     alert('Character name must be unique.')
     return
   }
 
-  const oldName = activeCharName.value
-  const charIndex = characters.value.findIndex(c => c.name === oldName)
-  
-  if (charIndex !== -1) {
-    characters.value[charIndex].name = newName
-    characters.value[charIndex].color = editCharColor.value
+  const beforeChars = JSON.parse(JSON.stringify(characters.value))
+  const beforeBeats = JSON.parse(JSON.stringify(beats.value))
+  const newColor = editCharColor.value
 
-    if (newName !== oldName) {
-      const cascadeRename = (beatList: Beat[]) => {
-        beatList.forEach(beat => {
-          const idx = beat.characters.indexOf(oldName)
-          if (idx !== -1) beat.characters.splice(idx, 1, newName)
-        })
+  executeCommand({
+    execute: () => {
+      const charIndex = characters.value.findIndex(c => c.name === oldName)
+      if (charIndex !== -1) {
+        characters.value[charIndex].name = newName
+        characters.value[charIndex].color = newColor
+
+        if (newName !== oldName) {
+          const cascadeRename = (beatList: Beat[]) => {
+            beatList.forEach(beat => {
+              const idx = beat.characters.indexOf(oldName)
+              if (idx !== -1) beat.characters.splice(idx, 1, newName)
+            })
+          }
+          cascadeRename(beats.value)
+          cascadeRename(trashed.value)
+        }
       }
-      cascadeRename(beats.value)
-      cascadeRename(trashed.value)
+    },
+    undo: () => {
+      characters.value = beforeChars
+      beats.value = beforeBeats
     }
-  }
+  })
   closeCharModal()
 }
 
@@ -293,59 +470,183 @@ function deleteCharacter() {
   if (!confirm(`Are you sure you want to delete ${activeCharName.value}? This will remove them from all beats.`)) return
   
   const nameToDelete = activeCharName.value
+  const beforeChars = JSON.parse(JSON.stringify(characters.value))
+  const beforeBeats = JSON.parse(JSON.stringify(beats.value))
+  const beforeTrashed = JSON.parse(JSON.stringify(trashed.value))
 
-  characters.value = characters.value.filter(c => c.name !== nameToDelete)
-  
-  const cascadeDelete = (beatList: Beat[]) => {
-    beatList.forEach(beat => {
-      beat.characters = beat.characters.filter(n => n !== nameToDelete)
-    })
-  }
-  
-  cascadeDelete(beats.value)
-  cascadeDelete(trashed.value)
+  executeCommand({
+    execute: () => {
+      characters.value = characters.value.filter(c => c.name !== nameToDelete)
+      const cascadeDelete = (beatList: Beat[]) => {
+        beatList.forEach(beat => {
+          beat.characters = beat.characters.filter(n => n !== nameToDelete)
+        })
+      }
+      cascadeDelete(beats.value)
+      cascadeDelete(trashed.value)
+    },
+    undo: () => {
+      characters.value = beforeChars
+      beats.value = beforeBeats
+      trashed.value = beforeTrashed
+    }
+  })
   
   closeCharModal()
 }
 
 // ---------------------------------------------------------------------------
-// Drag
+// Multi-Node Drag & Selection Engine
 // ---------------------------------------------------------------------------
 
-const drag = ref<{ id: string; startX: number; startNodeX: number } | null>(null)
+const drag = ref<{
+  startX: number
+  startPositions: Map<string, number>
+} | null>(null)
+
 let dragDistance = 0 
 
 function getClientX(e: MouseEvent | TouchEvent) {
   return 'touches' in e ? e.touches[0].clientX : e.clientX
 }
 
+function getClientY(e: MouseEvent | TouchEvent) {
+  return 'touches' in e ? e.touches[0].clientY : e.clientY
+}
+
 function startDrag(e: MouseEvent | TouchEvent, id: string) {
-  const beat = beats.value.find(b => b.id === id)
-  if (beat) {
-    drag.value = { id, startX: getClientX(e), startNodeX: beat.x }
-    dragDistance = 0
+  const isMultiKey = 'shiftKey' in e && (e.shiftKey || e.ctrlKey || e.metaKey)
+
+  // Handle Selection update on Drag Start
+  if (!selectedIds.value.has(id)) {
+    if (isMultiKey) {
+      selectedIds.value.add(id)
+    } else {
+      selectedIds.value = new Set([id])
+    }
+  }
+
+  // Record initial positions of all currently selected nodes
+  const startPositions = new Map<string, number>()
+  for (const selectedId of selectedIds.value) {
+    const b = beats.value.find(beat => beat.id === selectedId)
+    if (b) startPositions.set(selectedId, b.x)
+  }
+
+  drag.value = {
+    startX: getClientX(e),
+    startPositions
+  }
+  dragDistance = 0
+}
+
+function startBoardSelection(e: MouseEvent) {
+  // Ignore clicks triggered directly on node elements
+  if ((e.target as HTMLElement).closest('.node')) return
+
+  const boardRect = boardEl.value?.getBoundingClientRect()
+  if (!boardRect) return
+
+  const x = e.clientX - boardRect.left
+  const y = e.clientY - boardRect.top
+
+  selectionBox.value = { startX: x, startY: y, currentX: x, currentY: y }
+
+  if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    clearSelection()
   }
 }
 
 function onDrag(e: MouseEvent | TouchEvent) {
-  if (!drag.value) return
-  const beat = beats.value.find(b => b.id === drag.value!.id)
-  if (!beat) return
+  const currentX = getClientX(e)
 
+  // 1. Box Selection Dragging
+  if (selectionBox.value && 'clientX' in e && boardEl.value) {
+    const boardRect = boardEl.value.getBoundingClientRect()
+    selectionBox.value.currentX = e.clientX - boardRect.left
+    selectionBox.value.currentY = e.clientY - boardRect.top
+
+    // Calculate dynamic intersection box
+    const boxX1 = Math.min(selectionBox.value.startX, selectionBox.value.currentX)
+    const boxX2 = Math.max(selectionBox.value.startX, selectionBox.value.currentX)
+    const boxY1 = Math.min(selectionBox.value.startY, selectionBox.value.currentY)
+    const boxY2 = Math.max(selectionBox.value.startY, selectionBox.value.currentY)
+
+    renderedNodes.value.forEach(node => {
+      const inBox = node.x >= boxX1 && node.x <= boxX2 && node.y >= boxY1 && node.y <= boxY2
+      if (inBox) {
+        selectedIds.value.add(node.id)
+      } else if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        selectedIds.value.delete(node.id)
+      }
+    })
+    return
+  }
+
+  // 2. Multi-Node Dragging Movement
+  if (!drag.value) return
   if (e.cancelable) e.preventDefault()
 
-  const currentX = getClientX(e)
-  dragDistance = Math.abs(currentX - drag.value.startX)
-  
-  const newX = drag.value.startNodeX + currentX - drag.value.startX
-  beat.x = Math.max(30, newX)
+  const deltaX = currentX - drag.value.startX
+  dragDistance = Math.abs(deltaX)
+
+  // Shift all selected nodes simultaneously along X-axis
+  drag.value.startPositions.forEach((initialX, id) => {
+    const beat = beats.value.find(b => b.id === id)
+    if (beat) {
+      beat.x = Math.max(30, initialX + deltaX)
+    }
+  })
 }
 
-function endDrag() { drag.value = null }
+function endDrag() { 
+  if (selectionBox.value) {
+    selectionBox.value = null
+  }
 
-function handleNodeClick(id: string) {
+  if (drag.value) {
+    const startPositions = drag.value.startPositions
+    const finalPositions = new Map<string, number>()
+    
+    let hasMoved = false
+    startPositions.forEach((initialX, id) => {
+      const beat = beats.value.find(b => b.id === id)
+      if (beat) {
+        finalPositions.set(id, beat.x)
+        if (beat.x !== initialX) hasMoved = true
+      }
+    })
+
+    if (hasMoved) {
+      executeCommand({
+        execute: () => {
+          finalPositions.forEach((x, id) => {
+            const b = beats.value.find(beat => beat.id === id)
+            if (b) b.x = x
+          })
+        },
+        undo: () => {
+          startPositions.forEach((x, id) => {
+            const b = beats.value.find(beat => beat.id === id)
+            if (b) b.x = x
+          })
+        }
+      })
+    }
+  }
+  drag.value = null 
+}
+
+function handleNodeClick(e: MouseEvent, id: string) {
   if (dragDistance > 5) return
-  openModal(id)
+
+  const isMultiKey = e.shiftKey || e.ctrlKey || e.metaKey
+  selectNode(id, isMultiKey)
+
+  // Open modal if single selection click occurs
+  if (!isMultiKey) {
+    openModal(id)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -373,10 +674,24 @@ function onImport(e: Event) {
     try {
       const parsed = JSON.parse(ev.target?.result as string)
       if (parsed.characters && parsed.beats) {
-        characters.value = parsed.characters
-        beats.value = parsed.beats
-        trashed.value = []
-        activeId.value = beats.value[0]?.id ?? null
+        const oldChars = JSON.parse(JSON.stringify(characters.value))
+        const oldBeats = JSON.parse(JSON.stringify(beats.value))
+        const oldTrashed = JSON.parse(JSON.stringify(trashed.value))
+
+        executeCommand({
+          execute: () => {
+            characters.value = parsed.characters
+            beats.value = parsed.beats
+            trashed.value = []
+            selectedIds.value.clear()
+            activeId.value = beats.value[0]?.id ?? null
+          },
+          undo: () => {
+            characters.value = oldChars
+            beats.value = oldBeats
+            trashed.value = oldTrashed
+          }
+        })
       } else {
         alert('Invalid export format.')
       }
@@ -409,8 +724,12 @@ function onImport(e: Event) {
 
       <p class="brand-subtitle">Drag plot-beats side to side. Track characters across beats.</p>
 
-      <div>➕ Double-click to add a Plot Beat</div>
-      <br>
+      <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+        <button class="btn-io" :disabled="!canUndo" @click="undo" style="flex: 1">↩️ Undo</button>
+        <button class="btn-io" :disabled="!canRedo" @click="redo" style="flex: 1">↪️ Redo</button>
+      </div>
+
+      <div>➕ Double-click canvas to add a Plot Beat</div>
 
       <button class="btn-io" @click="isTrashModalOpen = true">🗑️ View Trash</button>
 
@@ -443,6 +762,7 @@ function onImport(e: Event) {
     <div
       ref="boardEl"
       class="board"
+      @mousedown="startBoardSelection"
       @mousemove="onDrag"
       @mouseup="endDrag"
       @mouseleave="endDrag"
@@ -453,8 +773,15 @@ function onImport(e: Event) {
     >
       <div class="board-content" :style="{ minWidth: contentWidth }">
         <p v-if="!renderedNodes.length" class="board-empty">
-          Canvas is empty — add a node from the panel.
+          Canvas is empty — double-click anywhere to add a node.
         </p>
+
+        <!-- Selection Box Element -->
+        <div 
+          v-if="selectionBox" 
+          class="selection-box"
+          :style="selectionBoxStyle"
+        ></div>
 
         <svg class="board-svg">
           <line
@@ -479,7 +806,7 @@ function onImport(e: Event) {
         <div
           v-for="node in renderedNodes" :key="node.id"
           class="node"
-          :class="{ active: activeId === node.id }"
+          :class="{ active: selectedIds.has(node.id) }"
           :style="{
             left: node.x + 'px',
             top: node.y + 'px',
@@ -489,7 +816,7 @@ function onImport(e: Event) {
           }"
           @mousedown="startDrag($event, node.id)"
           @touchstart="startDrag($event, node.id)"
-          @click.stop="handleNodeClick(node.id)"
+          @click.stop="handleNodeClick($event, node.id)"
         >
           <span class="node-label">{{ node.title }}</span>
         </div>
@@ -497,6 +824,7 @@ function onImport(e: Event) {
     </div>
   </div>
 
+  <!-- Modals remain structural components -->
   <div v-if="isModalOpen" class="modal-overlay" @mousedown.self="closeModal">
     <div class="modal-content" v-if="activeBeat">
       <div class="modal-header">
