@@ -18,6 +18,12 @@ export interface Edge {
   node_2: Node
 }
 
+export interface Chain {
+  anchorStart: Node
+  anchorEnd: Node
+  interior: Node[]
+}
+
 type RankMap = Record<string, number>
 
 const EPS = 1e-6
@@ -153,6 +159,96 @@ function buildIndices(
 
   return { nodeEdgeIdx, nodePairIdx }
 }
+
+// ---------------------------------------------------------------------------
+// Chain Compression (Phases 0 & 5)
+// ---------------------------------------------------------------------------
+
+function buildAdjacency(nodes: Node[], edges: Edge[]): Record<string, Node[]> {
+  const adj: Record<string, Node[]> = {}
+  for (const n of nodes) adj[n.name] = []
+  for (const e of edges) {
+    if (e.node_1.name === e.node_2.name) continue // self-loop, ignore for finding chains
+    adj[e.node_1.name].push(e.node_2)
+    adj[e.node_2.name].push(e.node_1)
+  }
+  return adj
+}
+
+function isInterior(name: string, adjacency: Record<string, Node[]>): boolean {
+  const neighbors = adjacency[name]
+  return neighbors.length === 2 && neighbors[0].name !== neighbors[1].name
+}
+
+function walkChain(
+  anchor: Node,
+  first: Node,
+  adjacency: Record<string, Node[]>,
+  interior: Set<string>,
+  visited: Set<string>
+): { chainNodes: Node[]; endAnchor: Node } {
+  const chainNodes: Node[] = []
+  let prev = anchor
+  let current = first
+
+  while (interior.has(current.name)) {
+    chainNodes.push(current)
+    visited.add(current.name)
+    const [a, b] = adjacency[current.name]
+    const nxt = a.name === prev.name ? b : a
+    prev = current
+    current = nxt
+  }
+  return { chainNodes, endAnchor: current }
+}
+
+function findChains(nodes: Node[], edges: Edge[]): Chain[] {
+  const adj = buildAdjacency(nodes, edges)
+  const interior = new Set(nodes.filter(n => isInterior(n.name, adj)).map(n => n.name))
+  
+  const visited = new Set<string>()
+  const chains: Chain[] = []
+
+  for (const node of nodes) {
+    if (interior.has(node.name)) continue // anchors only start a walk
+    for (const neighbor of adj[node.name] ?? []) {
+      if (interior.has(neighbor.name) && !visited.has(neighbor.name)) {
+        const { chainNodes, endAnchor } = walkChain(node, neighbor, adj, interior, visited)
+        chains.push({ anchorStart: node, anchorEnd: endAnchor, interior: chainNodes })
+      }
+    }
+  }
+
+  return chains
+}
+
+function compress(nodes: Node[], edges: Edge[]): { reducedNodes: Node[]; reducedEdges: Edge[]; chains: Chain[] } {
+  const chains = findChains(nodes, edges)
+  if (chains.length === 0) return { reducedNodes: nodes, reducedEdges: edges, chains: [] }
+
+  const interiorNames = new Set(chains.flatMap(c => c.interior.map(n => n.name)))
+  
+  const reducedNodes = nodes.filter(n => !interiorNames.has(n.name))
+  const keptEdges = edges.filter(e => !interiorNames.has(e.node_1.name) && !interiorNames.has(e.node_2.name))
+  const compressedEdges = chains.map(c => ({ node_1: c.anchorStart, node_2: c.anchorEnd }))
+
+  return { reducedNodes, reducedEdges: [...keptEdges, ...compressedEdges], chains }
+}
+
+function decompress(chains: Chain[]): void {
+  for (const chain of chains) {
+    const { anchorStart: start, anchorEnd: end } = chain
+    for (const node of chain.interior) {
+      if (end.x_coord === start.x_coord) {
+        node.y_coord = start.y_coord
+      } else {
+        const t = (node.x_coord - start.x_coord) / (end.x_coord - start.x_coord)
+        node.y_coord = start.y_coord + t * (end.y_coord - start.y_coord)
+      }
+    }
+  }
+}
+
 
 // ---------------------------------------------------------------------------
 // Rank ↔ Y-coordinate conversion
@@ -517,11 +613,91 @@ function applyRanks(nodes: Node[], ranks: RankMap, nLanes: number): void {
   }
 }
 
+/**
+ * Executes Phases 1-4 (greedy, local search, branch-and-bound, aesthetic tie-break).
+ */
+function runSearch(
+  workNodes: Node[],
+  workEdges: Edge[],
+  nLanes: number,
+  start: number,
+  searchDeadline: number
+): void {
+  const nodeNames = workNodes.map(n => n.name)
+  const allEdges = [...workEdges, ...workNodes.map(selfEdge)]
+  const pairs = overlappingPairs(allEdges)
+  
+  if (pairs.length === 0) {
+    // Provide distinct baseline lanes if nothing crosses/grazes
+    const defaultRanks = Object.fromEntries(nodeNames.map((n, i) => [n, i]))
+    applyRanks(workNodes, defaultRanks, nLanes)
+    return
+  }
+
+  const { nodePairIdx } = buildIndices(allEdges, nodeNames, pairs)
+  
+  const degree: Record<string, number> = Object.fromEntries(nodeNames.map(n => [n, 0]))
+  for (const e of workEdges) { degree[e.node_1.name]++; degree[e.node_2.name]++ }
+  const order = [...nodeNames].sort((a, b) => degree[b] - degree[a])
+
+  const searchBudget = searchDeadline - start
+
+  // Phase 1: Greedy
+  let { ranks, crossings } = greedy(order, allEdges, pairs, nodePairIdx, nLanes)
+
+  // Phase 2: Local search (up to 40% of budget)
+  if (crossings > 0) {
+    const lsDeadline = Math.min(start + searchBudget * 0.4, searchDeadline)
+    const ls = localSearch(ranks, allEdges, pairs, nodePairIdx, nLanes, lsDeadline)
+    if (ls.crossings < crossings) { ranks = ls.ranks; crossings = ls.crossings }
+  }
+
+  // Phase 3: Branch-and-bound (up to 80% of budget, leaving room for phase 4)
+  if (crossings > 0) {
+    const bbDeadline = Math.min(start + searchBudget * 0.8, searchDeadline)
+    const bb = branchAndBound(order, allEdges, pairs, nLanes, crossings, bbDeadline)
+    if (bb.ranks && bb.crossings < crossings) { ranks = bb.ranks; crossings = bb.crossings }
+  }
+
+  // Phase 4: Aesthetic Refinement
+  ranks = refineAesthetics(ranks, workEdges, workNodes, allEdges, pairs, nLanes, crossings, searchDeadline)
+
+  applyRanks(workNodes, ranks, nLanes)
+}
+
+/**
+ * Phase 6: a cheap hill-climb over the FULL graph, seeded from its current
+ * Y positions rather than built up from scratch.
+ */
+function runPolish(nodes: Node[], edges: Edge[], nLanes: number, deadline: number): void {
+  const remaining = deadline - (Date.now() / 1000)
+  if (remaining <= 0) return
+
+  const allEdges = [...edges, ...nodes.map(selfEdge)]
+  const pairs = overlappingPairs(allEdges)
+  if (pairs.length === 0) return
+
+  const nodeNames = nodes.map(n => n.name)
+  const { nodePairIdx } = buildIndices(allEdges, nodeNames, pairs)
+
+  // Seed ranks from the current Y order
+  const orderedByY = [...nodes].sort((a, b) => 
+    a.y_coord !== b.y_coord ? a.y_coord - b.y_coord : a.name.localeCompare(b.name)
+  )
+  const seedRanks: RankMap = Object.fromEntries(orderedByY.map((n, i) => [n.name, i]))
+
+  let { ranks, crossings } = localSearch(seedRanks, allEdges, pairs, nodePairIdx, nLanes, deadline)
+  ranks = refineAesthetics(ranks, edges, nodes, allEdges, pairs, nLanes, crossings, deadline)
+
+  applyRanks(nodes, ranks, nLanes)
+}
+
 export function assignLanes(
   nodes: Node[],
   edges: Edge[],
   nLanes = 100,
-  timeoutSeconds = 10
+  timeoutSeconds = 10,
+  simplify = true
 ): void {
   const start = Date.now() / 1000
   const deadline = start + timeoutSeconds
@@ -530,44 +706,28 @@ export function assignLanes(
     throw new Error(`More nodes (${nodes.length}) than lanes (${nLanes})`)
   }
 
-  const nodeNames = nodes.map(n => n.name)
+  // Phase 0: pre-simplification
+  let workNodes = nodes
+  let workEdges = edges
+  let chains: Chain[] = []
 
-  // Real edges plus one zero-width "self edge" per node — see selfEdge() for
-  // why. All three search phases just operate on generic edges/pairs, so
-  // folding these in here is enough to make every phase avoid node
-  // pass-throughs too, with no other changes needed below.
-  const allEdges = [...edges, ...nodes.map(selfEdge)]
-
-  const pairs = overlappingPairs(allEdges)
-  if (pairs.length === 0) return // Nothing can possibly cross or graze
-
-  const { nodePairIdx } = buildIndices(allEdges, nodeNames, pairs)
-
-  // Sort by degree descending (based on *real* edges only) for tighter early bounds
-  const degree: Record<string, number> = Object.fromEntries(nodeNames.map(n => [n, 0]))
-  for (const e of edges) { degree[e.node_1.name]++; degree[e.node_2.name]++ }
-  const order = [...nodeNames].sort((a, b) => degree[b] - degree[a])
-
-  // Phase 1: Greedy
-  let { ranks, crossings } = greedy(order, allEdges, pairs, nodePairIdx, nLanes)
-
-  // Phase 2: Local search (up to 40% of budget)
-  if (crossings > 0) {
-    const lsDeadline = Math.min(start + timeoutSeconds * 0.4, deadline)
-    const ls = localSearch(ranks, allEdges, pairs, nodePairIdx, nLanes, lsDeadline)
-    if (ls.crossings < crossings) { ranks = ls.ranks; crossings = ls.crossings }
+  if (simplify) {
+    const compressed = compress(nodes, edges)
+    workNodes = compressed.reducedNodes
+    workEdges = compressed.reducedEdges
+    chains = compressed.chains
   }
 
-  // Phase 3: Branch-and-bound (up to 80% of budget, leaving room for phase 4)
-  if (crossings > 0) {
-    const bbDeadline = Math.min(start + timeoutSeconds * 0.8, deadline)
-    const bb = branchAndBound(order, allEdges, pairs, nLanes, crossings, bbDeadline)
-    if (bb.ranks && bb.crossings < crossings) { ranks = bb.ranks; crossings = bb.crossings }
-  }
+  const searchDeadline = chains.length > 0 ? Math.min(start + timeoutSeconds * 0.85, deadline) : deadline
+  
+  // Phases 1-4
+  runSearch(workNodes, workEdges, nLanes, start, searchDeadline)
 
-  // Phase 4: among solutions at this crossing count, prefer the nicer-looking
-  // one. Strictly a tie-break — it can never make crossings worse.
-  ranks = refineAesthetics(ranks, edges, nodes, allEdges, pairs, nLanes, crossings, deadline)
+  if (chains.length === 0) return
 
-  applyRanks(nodes, ranks, nLanes)
+  // Phase 5: re-expansion
+  decompress(chains)
+
+  // Phase 6: polish
+  runPolish(nodes, edges, nLanes, deadline)
 }
