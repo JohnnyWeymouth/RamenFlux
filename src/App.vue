@@ -127,7 +127,163 @@ function handleKeyDown(e: KeyboardEvent) {
 }
 
 // ---------------------------------------------------------------------------
-// Layout Worker & Derived State (Preserved)
+// Multi-Node Drag & Selection Engine
+// ---------------------------------------------------------------------------
+
+const drag = ref<{
+  startX: number
+  startPositions: Map<string, number>
+} | null>(null)
+
+let dragDistance = 0 
+
+function getClientX(e: MouseEvent | TouchEvent) {
+  return 'touches' in e ? e.touches[0].clientX : e.clientX
+}
+
+function getClientY(e: MouseEvent | TouchEvent) {
+  return 'touches' in e ? e.touches[0].clientY : e.clientY
+}
+
+function startDrag(e: MouseEvent | TouchEvent, id: string) {
+  const isMultiKey = 'shiftKey' in e && (e.shiftKey || e.ctrlKey || e.metaKey)
+
+  // Handle Selection update on Drag Start
+  if (!selectedIds.value.has(id)) {
+    if (isMultiKey) {
+      selectedIds.value.add(id)
+    } else {
+      selectedIds.value = new Set([id])
+    }
+  }
+
+  // Record initial positions of all currently selected nodes
+  const startPositions = new Map<string, number>()
+  for (const selectedId of selectedIds.value) {
+    const b = beats.value.find(beat => beat.id === selectedId)
+    if (b) startPositions.set(selectedId, b.x)
+  }
+
+  drag.value = {
+    startX: getClientX(e),
+    startPositions
+  }
+  dragDistance = 0
+}
+
+function startBoardSelection(e: MouseEvent) {
+  // Ignore clicks triggered directly on node elements
+  if ((e.target as HTMLElement).closest('.node')) return
+
+  const boardRect = boardEl.value?.getBoundingClientRect()
+  if (!boardRect) return
+
+  const x = e.clientX - boardRect.left
+  const y = e.clientY - boardRect.top
+
+  selectionBox.value = { startX: x, startY: y, currentX: x, currentY: y }
+
+  if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    clearSelection()
+  }
+}
+
+function onDrag(e: MouseEvent | TouchEvent) {
+  const currentX = getClientX(e)
+
+  // 1. Box Selection Dragging
+  if (selectionBox.value && 'clientX' in e && boardEl.value) {
+    const boardRect = boardEl.value.getBoundingClientRect()
+    selectionBox.value.currentX = e.clientX - boardRect.left
+    selectionBox.value.currentY = e.clientY - boardRect.top
+
+    // Calculate dynamic intersection box
+    const boxX1 = Math.min(selectionBox.value.startX, selectionBox.value.currentX)
+    const boxX2 = Math.max(selectionBox.value.startX, selectionBox.value.currentX)
+    const boxY1 = Math.min(selectionBox.value.startY, selectionBox.value.currentY)
+    const boxY2 = Math.max(selectionBox.value.startY, selectionBox.value.currentY)
+
+    renderedNodes.value.forEach(node => {
+      const inBox = node.x >= boxX1 && node.x <= boxX2 && node.y >= boxY1 && node.y <= boxY2
+      if (inBox) {
+        selectedIds.value.add(node.id)
+      } else if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        selectedIds.value.delete(node.id)
+      }
+    })
+    return
+  }
+
+  // 2. Multi-Node Dragging Movement
+  if (!drag.value) return
+  if (e.cancelable) e.preventDefault()
+
+  const deltaX = currentX - drag.value.startX
+  dragDistance = Math.abs(deltaX)
+
+  // Shift all selected nodes simultaneously along X-axis
+  drag.value.startPositions.forEach((initialX, id) => {
+    const beat = beats.value.find(b => b.id === id)
+    if (beat) {
+      beat.x = Math.max(30, initialX + deltaX)
+    }
+  })
+}
+
+function endDrag() { 
+  if (selectionBox.value) {
+    selectionBox.value = null
+  }
+
+  if (drag.value) {
+    const startPositions = drag.value.startPositions
+    const finalPositions = new Map<string, number>()
+    
+    let hasMoved = false
+    startPositions.forEach((initialX, id) => {
+      const beat = beats.value.find(b => b.id === id)
+      if (beat) {
+        finalPositions.set(id, beat.x)
+        if (beat.x !== initialX) hasMoved = true
+      }
+    })
+
+    if (hasMoved) {
+      executeCommand({
+        execute: () => {
+          finalPositions.forEach((x, id) => {
+            const b = beats.value.find(beat => beat.id === id)
+            if (b) b.x = x
+          })
+        },
+        undo: () => {
+          startPositions.forEach((x, id) => {
+            const b = beats.value.find(beat => beat.id === id)
+            if (b) b.x = x
+          })
+        }
+      })
+      // Recalculate layout layout now that dragging is complete
+      triggerLayoutRecalc(0)
+    }
+  }
+  drag.value = null 
+}
+
+function handleNodeClick(e: MouseEvent, id: string) {
+  if (dragDistance > 5) return
+
+  const isMultiKey = e.shiftKey || e.ctrlKey || e.metaKey
+  selectNode(id, isMultiKey)
+
+  // Open modal if single selection click occurs
+  if (!isMultiKey) {
+    openModal(id)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Layout Worker & Derived State
 // ---------------------------------------------------------------------------
 
 const { request: requestLayout, dispose } = useLayoutWorker(beats, characters)
@@ -151,6 +307,7 @@ const triggerLayoutRecalc = (delay = 300) => {
 }
 
 watch(layoutSignature, (_new, old) => {
+  if (drag.value) return // Pause recalculation while user is actively dragging
   const delay = old === undefined ? 0 : 300
   triggerLayoutRecalc(delay)
 }, { immediate: true })
@@ -343,7 +500,7 @@ function restoreBeat(id: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Character actions & Edits (Preserved)
+// Character actions & Edits
 // ---------------------------------------------------------------------------
 
 function addGlobalChar() {
@@ -493,160 +650,6 @@ function deleteCharacter() {
   })
   
   closeCharModal()
-}
-
-// ---------------------------------------------------------------------------
-// Multi-Node Drag & Selection Engine
-// ---------------------------------------------------------------------------
-
-const drag = ref<{
-  startX: number
-  startPositions: Map<string, number>
-} | null>(null)
-
-let dragDistance = 0 
-
-function getClientX(e: MouseEvent | TouchEvent) {
-  return 'touches' in e ? e.touches[0].clientX : e.clientX
-}
-
-function getClientY(e: MouseEvent | TouchEvent) {
-  return 'touches' in e ? e.touches[0].clientY : e.clientY
-}
-
-function startDrag(e: MouseEvent | TouchEvent, id: string) {
-  const isMultiKey = 'shiftKey' in e && (e.shiftKey || e.ctrlKey || e.metaKey)
-
-  // Handle Selection update on Drag Start
-  if (!selectedIds.value.has(id)) {
-    if (isMultiKey) {
-      selectedIds.value.add(id)
-    } else {
-      selectedIds.value = new Set([id])
-    }
-  }
-
-  // Record initial positions of all currently selected nodes
-  const startPositions = new Map<string, number>()
-  for (const selectedId of selectedIds.value) {
-    const b = beats.value.find(beat => beat.id === selectedId)
-    if (b) startPositions.set(selectedId, b.x)
-  }
-
-  drag.value = {
-    startX: getClientX(e),
-    startPositions
-  }
-  dragDistance = 0
-}
-
-function startBoardSelection(e: MouseEvent) {
-  // Ignore clicks triggered directly on node elements
-  if ((e.target as HTMLElement).closest('.node')) return
-
-  const boardRect = boardEl.value?.getBoundingClientRect()
-  if (!boardRect) return
-
-  const x = e.clientX - boardRect.left
-  const y = e.clientY - boardRect.top
-
-  selectionBox.value = { startX: x, startY: y, currentX: x, currentY: y }
-
-  if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
-    clearSelection()
-  }
-}
-
-function onDrag(e: MouseEvent | TouchEvent) {
-  const currentX = getClientX(e)
-
-  // 1. Box Selection Dragging
-  if (selectionBox.value && 'clientX' in e && boardEl.value) {
-    const boardRect = boardEl.value.getBoundingClientRect()
-    selectionBox.value.currentX = e.clientX - boardRect.left
-    selectionBox.value.currentY = e.clientY - boardRect.top
-
-    // Calculate dynamic intersection box
-    const boxX1 = Math.min(selectionBox.value.startX, selectionBox.value.currentX)
-    const boxX2 = Math.max(selectionBox.value.startX, selectionBox.value.currentX)
-    const boxY1 = Math.min(selectionBox.value.startY, selectionBox.value.currentY)
-    const boxY2 = Math.max(selectionBox.value.startY, selectionBox.value.currentY)
-
-    renderedNodes.value.forEach(node => {
-      const inBox = node.x >= boxX1 && node.x <= boxX2 && node.y >= boxY1 && node.y <= boxY2
-      if (inBox) {
-        selectedIds.value.add(node.id)
-      } else if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
-        selectedIds.value.delete(node.id)
-      }
-    })
-    return
-  }
-
-  // 2. Multi-Node Dragging Movement
-  if (!drag.value) return
-  if (e.cancelable) e.preventDefault()
-
-  const deltaX = currentX - drag.value.startX
-  dragDistance = Math.abs(deltaX)
-
-  // Shift all selected nodes simultaneously along X-axis
-  drag.value.startPositions.forEach((initialX, id) => {
-    const beat = beats.value.find(b => b.id === id)
-    if (beat) {
-      beat.x = Math.max(30, initialX + deltaX)
-    }
-  })
-}
-
-function endDrag() { 
-  if (selectionBox.value) {
-    selectionBox.value = null
-  }
-
-  if (drag.value) {
-    const startPositions = drag.value.startPositions
-    const finalPositions = new Map<string, number>()
-    
-    let hasMoved = false
-    startPositions.forEach((initialX, id) => {
-      const beat = beats.value.find(b => b.id === id)
-      if (beat) {
-        finalPositions.set(id, beat.x)
-        if (beat.x !== initialX) hasMoved = true
-      }
-    })
-
-    if (hasMoved) {
-      executeCommand({
-        execute: () => {
-          finalPositions.forEach((x, id) => {
-            const b = beats.value.find(beat => beat.id === id)
-            if (b) b.x = x
-          })
-        },
-        undo: () => {
-          startPositions.forEach((x, id) => {
-            const b = beats.value.find(beat => beat.id === id)
-            if (b) b.x = x
-          })
-        }
-      })
-    }
-  }
-  drag.value = null 
-}
-
-function handleNodeClick(e: MouseEvent, id: string) {
-  if (dragDistance > 5) return
-
-  const isMultiKey = e.shiftKey || e.ctrlKey || e.metaKey
-  selectNode(id, isMultiKey)
-
-  // Open modal if single selection click occurs
-  if (!isMultiKey) {
-    openModal(id)
-  }
 }
 
 // ---------------------------------------------------------------------------
