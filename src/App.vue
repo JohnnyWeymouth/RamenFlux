@@ -11,12 +11,14 @@ const characters  = ref<Character[]>([])
 const beats       = ref<Beat[]>([])
 const trashed     = ref<Beat[]>([])
 
-// Refactored Multi-selection State
+// Recency tracking for character additions (charName -> timestamp)
+const charLastAdded = ref<Record<string, number>>({})
+
+// Multi-selection State
 const selectedIds = ref<Set<string>>(new Set())
 const activeId    = ref<string | null>(null) // Primary beat focused in modal
 
 const newCharName = ref('')
-const charToAdd   = ref('')
 const modalNewCharName = ref('')
 const isSidebarOpen = ref(true)
 
@@ -34,6 +36,50 @@ const boardEl   = ref<HTMLElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 
 const COLOR_PALETTE = ['#8b5cf6', '#ec4899', '#06b6d4', '#14b8a6', '#f97316', '#ef4444', '#10b981']
+
+// ---------------------------------------------------------------------------
+// Recency Helpers & Computed Characters
+// ---------------------------------------------------------------------------
+
+function markCharAsRecentlyAdded(name: string) {
+  charLastAdded.value = {
+    ...charLastAdded.value,
+    [name]: Date.now()
+  }
+}
+
+const sortedCharactersForModal = computed(() => {
+  return [...characters.value].sort((a, b) => {
+    // 1. Prioritize characters selected in the currently active beat
+    const aSelected = activeBeat.value?.characters.includes(a.name) ?? false
+    const bSelected = activeBeat.value?.characters.includes(b.name) ?? false
+
+    if (aSelected !== bSelected) {
+      return aSelected ? -1 : 1
+    }
+
+    // 2. Fall back to priority queue (most recently added first)
+    const timeA = charLastAdded.value[a.name] ?? 0
+    const timeB = charLastAdded.value[b.name] ?? 0
+    if (timeA !== timeB) {
+      return timeB - timeA
+    }
+
+    // 3. Fall back to alphabetical tie-breaking
+    return a.name.localeCompare(b.name)
+  })
+})
+
+function toggleCharInActiveBeat(charName: string) {
+  if (!activeBeat.value) return
+  const idx = activeBeat.value.characters.indexOf(charName)
+  if (idx > -1) {
+    activeBeat.value.characters.splice(idx, 1)
+  } else {
+    activeBeat.value.characters.push(charName)
+    markCharAsRecentlyAdded(charName)
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Selection Box State & Helpers
@@ -148,7 +194,6 @@ function getClientY(e: MouseEvent | TouchEvent) {
 function startDrag(e: MouseEvent | TouchEvent, id: string) {
   const isMultiKey = 'shiftKey' in e && (e.shiftKey || e.ctrlKey || e.metaKey)
 
-  // Handle Selection update on Drag Start
   if (!selectedIds.value.has(id)) {
     if (isMultiKey) {
       selectedIds.value.add(id)
@@ -157,7 +202,6 @@ function startDrag(e: MouseEvent | TouchEvent, id: string) {
     }
   }
 
-  // Record initial positions of all currently selected nodes
   const startPositions = new Map<string, number>()
   for (const selectedId of selectedIds.value) {
     const b = beats.value.find(beat => beat.id === selectedId)
@@ -172,7 +216,6 @@ function startDrag(e: MouseEvent | TouchEvent, id: string) {
 }
 
 function startBoardSelection(e: MouseEvent) {
-  // Ignore clicks triggered directly on node elements
   if ((e.target as HTMLElement).closest('.node')) return
 
   const boardRect = boardEl.value?.getBoundingClientRect()
@@ -191,13 +234,11 @@ function startBoardSelection(e: MouseEvent) {
 function onDrag(e: MouseEvent | TouchEvent) {
   const currentX = getClientX(e)
 
-  // 1. Box Selection Dragging
   if (selectionBox.value && 'clientX' in e && boardEl.value) {
     const boardRect = boardEl.value.getBoundingClientRect()
     selectionBox.value.currentX = e.clientX - boardRect.left
     selectionBox.value.currentY = e.clientY - boardRect.top
 
-    // Calculate dynamic intersection box
     const boxX1 = Math.min(selectionBox.value.startX, selectionBox.value.currentX)
     const boxX2 = Math.max(selectionBox.value.startX, selectionBox.value.currentX)
     const boxY1 = Math.min(selectionBox.value.startY, selectionBox.value.currentY)
@@ -214,14 +255,12 @@ function onDrag(e: MouseEvent | TouchEvent) {
     return
   }
 
-  // 2. Multi-Node Dragging Movement
   if (!drag.value) return
   if (e.cancelable) e.preventDefault()
 
   const deltaX = currentX - drag.value.startX
   dragDistance = Math.abs(deltaX)
 
-  // Shift all selected nodes simultaneously along X-axis
   drag.value.startPositions.forEach((initialX, id) => {
     const beat = beats.value.find(b => b.id === id)
     if (beat) {
@@ -263,7 +302,6 @@ function endDrag() {
           })
         }
       })
-      // Recalculate layout layout now that dragging is complete
       triggerLayoutRecalc(0)
     }
   }
@@ -276,7 +314,6 @@ function handleNodeClick(e: MouseEvent, id: string) {
   const isMultiKey = e.shiftKey || e.ctrlKey || e.metaKey
   selectNode(id, isMultiKey)
 
-  // Open modal if single selection click occurs
   if (!isMultiKey) {
     openModal(id)
   }
@@ -307,7 +344,7 @@ const triggerLayoutRecalc = (delay = 300) => {
 }
 
 watch(layoutSignature, (_new, old) => {
-  if (drag.value) return // Pause recalculation while user is actively dragging
+  if (drag.value) return
   const delay = old === undefined ? 0 : 300
   triggerLayoutRecalc(delay)
 }, { immediate: true })
@@ -329,11 +366,6 @@ onUnmounted(() => {
 
 const activeBeat = computed(() => beats.value.find(b => b.id === activeId.value))
 const charNames = computed(() => characters.value.map(c => c.name))
-const availableChars = computed(() =>
-  activeBeat.value
-    ? charNames.value.filter(n => !activeBeat.value!.characters.includes(n))
-    : []
-)
 
 const renderedNodes = computed<RenderedNode[]>(() => {
   const canvasH = boardEl.value?.clientHeight ?? 600
@@ -510,41 +542,15 @@ function addGlobalChar() {
   const newChar = { name, color }
 
   executeCommand({
-    execute: () => characters.value.push(newChar),
+    execute: () => {
+      characters.value.push(newChar)
+      markCharAsRecentlyAdded(name)
+    },
     undo: () => {
       characters.value = characters.value.filter(c => c.name !== name)
     }
   })
   newCharName.value = ''
-}
-
-function addCharToBeat() {
-  if (!charToAdd.value || !activeBeat.value) return
-  const charName = charToAdd.value
-  const targetBeat = activeBeat.value
-
-  executeCommand({
-    execute: () => targetBeat.characters.push(charName),
-    undo: () => {
-      targetBeat.characters = targetBeat.characters.filter(c => c !== charName)
-    }
-  })
-  charToAdd.value = ''
-}
-
-function removeCharFromBeat(name: string) {
-  if (!activeBeat.value) return
-  const targetBeat = activeBeat.value
-  const charIdx = targetBeat.characters.indexOf(name)
-
-  executeCommand({
-    execute: () => {
-      targetBeat.characters = targetBeat.characters.filter(c => c !== name)
-    },
-    undo: () => {
-      if (charIdx !== -1) targetBeat.characters.splice(charIdx, 0, name)
-    }
-  })
 }
 
 function createAndAddCharInModal() {
@@ -559,6 +565,7 @@ function createAndAddCharInModal() {
     execute: () => {
       if (isGlobalNew) characters.value.push({ name, color })
       if (!targetBeat.characters.includes(name)) targetBeat.characters.push(name)
+      markCharAsRecentlyAdded(name)
     },
     undo: () => {
       targetBeat.characters = targetBeat.characters.filter(c => c !== name)
@@ -611,6 +618,10 @@ function saveCharacter() {
           }
           cascadeRename(beats.value)
           cascadeRename(trashed.value)
+          if (charLastAdded.value[oldName]) {
+            charLastAdded.value[newName] = charLastAdded.value[oldName]
+            delete charLastAdded.value[oldName]
+          }
         }
       }
     },
@@ -827,7 +838,7 @@ function onImport(e: Event) {
     </div>
   </div>
 
-  <!-- Modals remain structural components -->
+  <!-- Modal for Beat Editing -->
   <div v-if="isModalOpen" class="modal-overlay" @mousedown.self="closeModal">
     <div class="modal-content" v-if="activeBeat">
       <div class="modal-header">
@@ -845,25 +856,34 @@ function onImport(e: Event) {
 
         <div class="divider" />
         
-        <h5 style="margin-bottom: 8px;">Characters present</h5>
-        <div class="active-chars">
-          <p v-if="!activeBeat.characters.length" class="muted">None yet.</p>
-          <div v-for="name in activeBeat.characters" :key="name" class="char-row">
-            <span>{{ name }}</span>
-            <button class="btn-icon" @click="removeCharFromBeat(name)">❌</button>
-          </div>
+        <h5 style="margin-bottom: 8px;">Characters Present</h5>
+        
+        <!-- Checkbox Selection List sorted by recency -->
+        <div class="char-checkbox-list">
+          <p v-if="!characters.length" class="muted" style="margin: 4px 0;">No characters registered yet.</p>
+          <label
+            v-for="c in sortedCharactersForModal"
+            :key="c.name"
+            class="char-checkbox-item"
+          >
+            <input
+              type="checkbox"
+              :checked="activeBeat.characters.includes(c.name)"
+              @change="toggleCharInActiveBeat(c.name)"
+            />
+            <span class="char-color-preview" :style="{ backgroundColor: c.color }"></span>
+            <span class="char-name">{{ c.name }}</span>
+          </label>
         </div>
 
-        <div class="add-char-tools">
-          <select v-if="availableChars.length" v-model="charToAdd" @change="addCharToBeat">
-            <option value="" disabled selected>➕ Add existing character…</option>
-            <option v-for="c in availableChars" :key="c" :value="c">{{ c }}</option>
-          </select>
-          
-          <div class="new-char-inline">
-            <input type="text" v-model="modalNewCharName" placeholder="Or create a brand new character..." @keyup.enter="createAndAddCharInModal" />
-            <button class="btn-io" @click="createAndAddCharInModal">Add</button>
-          </div>
+        <div class="new-char-inline" style="margin-top: 12px;">
+          <input 
+            type="text" 
+            v-model="modalNewCharName" 
+            placeholder="Create & attach new character..." 
+            @keyup.enter="createAndAddCharInModal" 
+          />
+          <button class="btn-io" @click="createAndAddCharInModal">Add</button>
         </div>
 
         <div class="divider" />
