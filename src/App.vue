@@ -11,24 +11,30 @@ const characters  = ref<Character[]>([])
 const beats       = ref<Beat[]>([])
 const trashed     = ref<Beat[]>([])
 
-// Refactored Multi-selection State
+// Recency tracking for character additions (charName -> timestamp)
+const charLastAdded = ref<Record<string, number>>({})
+
+// Multi-selection State
 const selectedIds = ref<Set<string>>(new Set())
 const activeId    = ref<string | null>(null) // Primary beat focused in modal
 
 const newCharName = ref('')
-const charToAdd   = ref('')
 const modalNewCharName = ref('')
-const isSidebarOpen = ref(true)
+
+// Menu Overlay States
+const isSidebarOpen = ref(false)
+const isDebugOpen   = ref(false)
+const isYLocked     = ref(true)
 
 // Modal states
-const isModalOpen = ref(false)
+const isModalOpen      = ref(false)
 const isTrashModalOpen = ref(false)
-const isCharModalOpen = ref(false)
+const isCharModalOpen  = ref(false)
 
 // Character Edit State
 const activeCharName = ref<string | null>(null)
-const editCharName = ref('')
-const editCharColor = ref('')
+const editCharName   = ref('')
+const editCharColor  = ref('')
 
 const boardEl   = ref<HTMLElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -36,15 +42,107 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const COLOR_PALETTE = ['#8b5cf6', '#ec4899', '#06b6d4', '#14b8a6', '#f97316', '#ef4444', '#10b981']
 
 // ---------------------------------------------------------------------------
-// Selection Box State & Helpers
+// Recency Helpers & Computed Characters
 // ---------------------------------------------------------------------------
 
-interface Rect {
-  left: number
-  top: number
-  right: number
-  bottom: number
+function markCharAsRecentlyAdded(name: string) {
+  charLastAdded.value = {
+    ...charLastAdded.value,
+    [name]: Date.now()
+  }
 }
+
+const sortedCharactersForModal = computed(() => {
+  return [...characters.value].sort((a, b) => {
+    const aSelected = activeBeat.value?.characters.includes(a.name) ?? false
+    const bSelected = activeBeat.value?.characters.includes(b.name) ?? false
+
+    if (aSelected !== bSelected) {
+      return aSelected ? -1 : 1
+    }
+
+    const timeA = charLastAdded.value[a.name] ?? 0
+    const timeB = charLastAdded.value[b.name] ?? 0
+    if (timeA !== timeB) {
+      return timeB - timeA
+    }
+
+    return a.name.localeCompare(b.name)
+  })
+})
+
+function toggleCharInActiveBeat(charName: string) {
+  if (!activeBeat.value) return
+  const idx = activeBeat.value.characters.indexOf(charName)
+  if (idx > -1) {
+    activeBeat.value.characters.splice(idx, 1)
+  } else {
+    activeBeat.value.characters.push(charName)
+    markCharAsRecentlyAdded(charName)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Crossing Detection Algorithm
+// ---------------------------------------------------------------------------
+
+function doSegmentsIntersect(
+  p1: { x: number; y: number },
+  p2: { x: number; y: number },
+  p3: { x: number; y: number },
+  p4: { x: number; y: number }
+): boolean {
+  // Ignore if segments share end points
+  if ((p1.x === p3.x && p1.y === p3.y) || (p1.x === p4.x && p1.y === p4.y) ||
+      (p2.x === p3.x && p2.y === p3.y) || (p2.x === p4.x && p2.y === p4.y)) {
+    return false
+  }
+
+  const ccw = (a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }) =>
+    (c.y - a.y) * (b.x - a.x) - (b.y - a.y) * (c.x - a.x)
+
+  const d1 = ccw(p3, p4, p1)
+  const d2 = ccw(p3, p4, p2)
+  const d3 = ccw(p1, p2, p3)
+  const d4 = ccw(p1, p2, p4)
+
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+         ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
+}
+
+const crossingCount = computed(() => {
+  const charSegments: Array<{ char: string; p1: { x: number; y: number }; p2: { x: number; y: number } }> = []
+
+  for (const char of characters.value) {
+    const charNodes = renderedNodes.value
+      .filter(n => n.characters.includes(char.name))
+      .sort((a, b) => a.x - b.x)
+
+    for (let i = 0; i < charNodes.length - 1; i++) {
+      charSegments.push({
+        char: char.name,
+        p1: { x: charNodes[i].x, y: charNodes[i].y },
+        p2: { x: charNodes[i + 1].x, y: charNodes[i + 1].y }
+      })
+    }
+  }
+
+  let count = 0
+  for (let i = 0; i < charSegments.length; i++) {
+    for (let j = i + 1; j < charSegments.length; j++) {
+      if (charSegments[i].char === charSegments[j].char) continue
+      if (doSegmentsIntersect(charSegments[i].p1, charSegments[i].p2, charSegments[j].p1, charSegments[j].p2)) {
+        count++
+      }
+    }
+  }
+
+  return count
+})
+
+// ---------------------------------------------------------------------------
+// Selection Box State & Helpers
+// ---------------------------------------------------------------------------
 
 const selectionBox = ref<{ startX: number; startY: number; currentX: number; currentY: number } | null>(null)
 
@@ -79,7 +177,7 @@ function selectNode(id: string, multi = false) {
 }
 
 // ---------------------------------------------------------------------------
-// Command Pattern / Undo & Redo History
+// Undo & Redo
 // ---------------------------------------------------------------------------
 
 interface Command {
@@ -88,7 +186,7 @@ interface Command {
 }
 
 const historyStack = ref<Command[]>([])
-const redoStack = ref<Command[]>([])
+const redoStack    = ref<Command[]>([])
 
 const canUndo = computed(() => historyStack.value.length > 0)
 const canRedo = computed(() => redoStack.value.length > 0)
@@ -127,7 +225,173 @@ function handleKeyDown(e: KeyboardEvent) {
 }
 
 // ---------------------------------------------------------------------------
-// Layout Worker & Derived State (Preserved)
+// Multi-Node Drag & Selection Engine
+// ---------------------------------------------------------------------------
+
+const drag = ref<{
+  startX: number
+  startY: number
+  startPositions: Map<string, { x: number; y: number }>
+} | null>(null)
+
+let dragDistance = 0 
+
+function getClientX(e: MouseEvent | TouchEvent) {
+  return 'touches' in e ? e.touches[0].clientX : e.clientX
+}
+
+function getClientY(e: MouseEvent | TouchEvent) {
+  return 'touches' in e ? e.touches[0].clientY : e.clientY
+}
+
+function startDrag(e: MouseEvent | TouchEvent, id: string) {
+  const isMultiKey = 'shiftKey' in e && (e.shiftKey || e.ctrlKey || e.metaKey)
+
+  if (!selectedIds.value.has(id)) {
+    if (isMultiKey) {
+      selectedIds.value.add(id)
+    } else {
+      selectedIds.value = new Set([id])
+    }
+  }
+
+  const canvasH = boardEl.value?.clientHeight ?? 600
+  const startPositions = new Map<string, { x: number; y: number }>()
+  for (const selectedId of selectedIds.value) {
+    const b = beats.value.find(beat => beat.id === selectedId)
+    if (b) {
+      startPositions.set(selectedId, { x: b.x, y: b.y ?? canvasH / 2 })
+    }
+  }
+
+  drag.value = {
+    startX: getClientX(e),
+    startY: getClientY(e),
+    startPositions
+  }
+  dragDistance = 0
+}
+
+function startBoardSelection(e: MouseEvent) {
+  if ((e.target as HTMLElement).closest('.node')) return
+
+  const boardRect = boardEl.value?.getBoundingClientRect()
+  if (!boardRect) return
+
+  const x = e.clientX - boardRect.left
+  const y = e.clientY - boardRect.top
+
+  selectionBox.value = { startX: x, startY: y, currentX: x, currentY: y }
+
+  if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    clearSelection()
+  }
+}
+
+function onDrag(e: MouseEvent | TouchEvent) {
+  const currentX = getClientX(e)
+  const currentY = getClientY(e)
+
+  if (selectionBox.value && 'clientX' in e && boardEl.value) {
+    const boardRect = boardEl.value.getBoundingClientRect()
+    selectionBox.value.currentX = e.clientX - boardRect.left
+    selectionBox.value.currentY = e.clientY - boardRect.top
+
+    const boxX1 = Math.min(selectionBox.value.startX, selectionBox.value.currentX)
+    const boxX2 = Math.max(selectionBox.value.startX, selectionBox.value.currentX)
+    const boxY1 = Math.min(selectionBox.value.startY, selectionBox.value.currentY)
+    const boxY2 = Math.max(selectionBox.value.startY, selectionBox.value.currentY)
+
+    renderedNodes.value.forEach(node => {
+      const inBox = node.x >= boxX1 && node.x <= boxX2 && node.y >= boxY1 && node.y <= boxY2
+      if (inBox) {
+        selectedIds.value.add(node.id)
+      } else if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        selectedIds.value.delete(node.id)
+      }
+    })
+    return
+  }
+
+  if (!drag.value) return
+  if (e.cancelable) e.preventDefault()
+
+  const deltaX = currentX - drag.value.startX
+  const deltaY = currentY - drag.value.startY
+  dragDistance = Math.hypot(deltaX, deltaY)
+
+  drag.value.startPositions.forEach((pos, id) => {
+    const beat = beats.value.find(b => b.id === id)
+    if (beat) {
+      beat.x = Math.max(30, pos.x + deltaX)
+      if (!isYLocked.value) {
+        beat.y = Math.max(30, pos.y + deltaY)
+      }
+    }
+  })
+}
+
+function endDrag() { 
+  if (selectionBox.value) {
+    selectionBox.value = null
+  }
+
+  if (drag.value) {
+    const startPositions = drag.value.startPositions
+    const finalPositions = new Map<string, { x: number; y: number }>()
+    
+    let hasMoved = false
+    startPositions.forEach((pos, id) => {
+      const beat = beats.value.find(b => b.id === id)
+      if (beat) {
+        const curY = beat.y ?? pos.y
+        finalPositions.set(id, { x: beat.x, y: curY })
+        if (beat.x !== pos.x || curY !== pos.y) hasMoved = true
+      }
+    })
+
+    if (hasMoved) {
+      executeCommand({
+        execute: () => {
+          finalPositions.forEach((pos, id) => {
+            const b = beats.value.find(beat => beat.id === id)
+            if (b) {
+              b.x = pos.x
+              b.y = pos.y
+            }
+          })
+        },
+        undo: () => {
+          startPositions.forEach((pos, id) => {
+            const b = beats.value.find(beat => beat.id === id)
+            if (b) {
+              b.x = pos.x
+              b.y = pos.y
+            }
+          })
+        }
+      })
+      if (isYLocked.value) {
+        triggerLayoutRecalc(0)
+      }
+    }
+  }
+  drag.value = null 
+}
+
+function handleNodeClick(e: MouseEvent, id: string) {
+  if (dragDistance > 5) return
+
+  const isMultiKey = e.shiftKey || e.ctrlKey || e.metaKey
+  selectNode(id, isMultiKey)
+
+  if (!isMultiKey) {
+    openModal(id)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Layout Worker & Derived State
 // ---------------------------------------------------------------------------
 
 const { request: requestLayout, dispose } = useLayoutWorker(beats, characters)
@@ -150,7 +414,13 @@ const triggerLayoutRecalc = (delay = 300) => {
   }, delay)
 }
 
+function forceRecalculateY() {
+  const canvasH = boardEl.value?.clientHeight ?? 600
+  requestLayout(canvasH)
+}
+
 watch(layoutSignature, (_new, old) => {
+  if (drag.value || !isYLocked.value) return
   const delay = old === undefined ? 0 : 300
   triggerLayoutRecalc(delay)
 }, { immediate: true })
@@ -171,12 +441,7 @@ onUnmounted(() => {
 })
 
 const activeBeat = computed(() => beats.value.find(b => b.id === activeId.value))
-const charNames = computed(() => characters.value.map(c => c.name))
-const availableChars = computed(() =>
-  activeBeat.value
-    ? charNames.value.filter(n => !activeBeat.value!.characters.includes(n))
-    : []
-)
+const charNames  = computed(() => characters.value.map(c => c.name))
 
 const renderedNodes = computed<RenderedNode[]>(() => {
   const canvasH = boardEl.value?.clientHeight ?? 600
@@ -199,8 +464,8 @@ const computedSegments = computed<RenderedSegment[]>(() => {
 
     for (let i = 0; i < charNodes.length - 1; i++) {
       const from = charNodes[i]
-      const to = charNodes[i + 1]
-      const key = `${from.id}->${to.id}`
+      const to   = charNodes[i + 1]
+      const key  = `${from.id}->${to.id}`
       if (!segMap.has(key)) segMap.set(key, { from, to, colors: [] })
       segMap.get(key)!.colors.push(char.color)
     }
@@ -343,7 +608,7 @@ function restoreBeat(id: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Character actions & Edits (Preserved)
+// Character actions & Edits
 // ---------------------------------------------------------------------------
 
 function addGlobalChar() {
@@ -353,41 +618,15 @@ function addGlobalChar() {
   const newChar = { name, color }
 
   executeCommand({
-    execute: () => characters.value.push(newChar),
+    execute: () => {
+      characters.value.push(newChar)
+      markCharAsRecentlyAdded(name)
+    },
     undo: () => {
       characters.value = characters.value.filter(c => c.name !== name)
     }
   })
   newCharName.value = ''
-}
-
-function addCharToBeat() {
-  if (!charToAdd.value || !activeBeat.value) return
-  const charName = charToAdd.value
-  const targetBeat = activeBeat.value
-
-  executeCommand({
-    execute: () => targetBeat.characters.push(charName),
-    undo: () => {
-      targetBeat.characters = targetBeat.characters.filter(c => c !== charName)
-    }
-  })
-  charToAdd.value = ''
-}
-
-function removeCharFromBeat(name: string) {
-  if (!activeBeat.value) return
-  const targetBeat = activeBeat.value
-  const charIdx = targetBeat.characters.indexOf(name)
-
-  executeCommand({
-    execute: () => {
-      targetBeat.characters = targetBeat.characters.filter(c => c !== name)
-    },
-    undo: () => {
-      if (charIdx !== -1) targetBeat.characters.splice(charIdx, 0, name)
-    }
-  })
 }
 
 function createAndAddCharInModal() {
@@ -402,6 +641,7 @@ function createAndAddCharInModal() {
     execute: () => {
       if (isGlobalNew) characters.value.push({ name, color })
       if (!targetBeat.characters.includes(name)) targetBeat.characters.push(name)
+      markCharAsRecentlyAdded(name)
     },
     undo: () => {
       targetBeat.characters = targetBeat.characters.filter(c => c !== name)
@@ -454,6 +694,10 @@ function saveCharacter() {
           }
           cascadeRename(beats.value)
           cascadeRename(trashed.value)
+          if (charLastAdded.value[oldName]) {
+            charLastAdded.value[newName] = charLastAdded.value[oldName]
+            delete charLastAdded.value[oldName]
+          }
         }
       }
     },
@@ -470,8 +714,8 @@ function deleteCharacter() {
   if (!confirm(`Are you sure you want to delete ${activeCharName.value}? This will remove them from all beats.`)) return
   
   const nameToDelete = activeCharName.value
-  const beforeChars = JSON.parse(JSON.stringify(characters.value))
-  const beforeBeats = JSON.parse(JSON.stringify(beats.value))
+  const beforeChars   = JSON.parse(JSON.stringify(characters.value))
+  const beforeBeats   = JSON.parse(JSON.stringify(beats.value))
   const beforeTrashed = JSON.parse(JSON.stringify(trashed.value))
 
   executeCommand({
@@ -493,160 +737,6 @@ function deleteCharacter() {
   })
   
   closeCharModal()
-}
-
-// ---------------------------------------------------------------------------
-// Multi-Node Drag & Selection Engine
-// ---------------------------------------------------------------------------
-
-const drag = ref<{
-  startX: number
-  startPositions: Map<string, number>
-} | null>(null)
-
-let dragDistance = 0 
-
-function getClientX(e: MouseEvent | TouchEvent) {
-  return 'touches' in e ? e.touches[0].clientX : e.clientX
-}
-
-function getClientY(e: MouseEvent | TouchEvent) {
-  return 'touches' in e ? e.touches[0].clientY : e.clientY
-}
-
-function startDrag(e: MouseEvent | TouchEvent, id: string) {
-  const isMultiKey = 'shiftKey' in e && (e.shiftKey || e.ctrlKey || e.metaKey)
-
-  // Handle Selection update on Drag Start
-  if (!selectedIds.value.has(id)) {
-    if (isMultiKey) {
-      selectedIds.value.add(id)
-    } else {
-      selectedIds.value = new Set([id])
-    }
-  }
-
-  // Record initial positions of all currently selected nodes
-  const startPositions = new Map<string, number>()
-  for (const selectedId of selectedIds.value) {
-    const b = beats.value.find(beat => beat.id === selectedId)
-    if (b) startPositions.set(selectedId, b.x)
-  }
-
-  drag.value = {
-    startX: getClientX(e),
-    startPositions
-  }
-  dragDistance = 0
-}
-
-function startBoardSelection(e: MouseEvent) {
-  // Ignore clicks triggered directly on node elements
-  if ((e.target as HTMLElement).closest('.node')) return
-
-  const boardRect = boardEl.value?.getBoundingClientRect()
-  if (!boardRect) return
-
-  const x = e.clientX - boardRect.left
-  const y = e.clientY - boardRect.top
-
-  selectionBox.value = { startX: x, startY: y, currentX: x, currentY: y }
-
-  if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
-    clearSelection()
-  }
-}
-
-function onDrag(e: MouseEvent | TouchEvent) {
-  const currentX = getClientX(e)
-
-  // 1. Box Selection Dragging
-  if (selectionBox.value && 'clientX' in e && boardEl.value) {
-    const boardRect = boardEl.value.getBoundingClientRect()
-    selectionBox.value.currentX = e.clientX - boardRect.left
-    selectionBox.value.currentY = e.clientY - boardRect.top
-
-    // Calculate dynamic intersection box
-    const boxX1 = Math.min(selectionBox.value.startX, selectionBox.value.currentX)
-    const boxX2 = Math.max(selectionBox.value.startX, selectionBox.value.currentX)
-    const boxY1 = Math.min(selectionBox.value.startY, selectionBox.value.currentY)
-    const boxY2 = Math.max(selectionBox.value.startY, selectionBox.value.currentY)
-
-    renderedNodes.value.forEach(node => {
-      const inBox = node.x >= boxX1 && node.x <= boxX2 && node.y >= boxY1 && node.y <= boxY2
-      if (inBox) {
-        selectedIds.value.add(node.id)
-      } else if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
-        selectedIds.value.delete(node.id)
-      }
-    })
-    return
-  }
-
-  // 2. Multi-Node Dragging Movement
-  if (!drag.value) return
-  if (e.cancelable) e.preventDefault()
-
-  const deltaX = currentX - drag.value.startX
-  dragDistance = Math.abs(deltaX)
-
-  // Shift all selected nodes simultaneously along X-axis
-  drag.value.startPositions.forEach((initialX, id) => {
-    const beat = beats.value.find(b => b.id === id)
-    if (beat) {
-      beat.x = Math.max(30, initialX + deltaX)
-    }
-  })
-}
-
-function endDrag() { 
-  if (selectionBox.value) {
-    selectionBox.value = null
-  }
-
-  if (drag.value) {
-    const startPositions = drag.value.startPositions
-    const finalPositions = new Map<string, number>()
-    
-    let hasMoved = false
-    startPositions.forEach((initialX, id) => {
-      const beat = beats.value.find(b => b.id === id)
-      if (beat) {
-        finalPositions.set(id, beat.x)
-        if (beat.x !== initialX) hasMoved = true
-      }
-    })
-
-    if (hasMoved) {
-      executeCommand({
-        execute: () => {
-          finalPositions.forEach((x, id) => {
-            const b = beats.value.find(beat => beat.id === id)
-            if (b) b.x = x
-          })
-        },
-        undo: () => {
-          startPositions.forEach((x, id) => {
-            const b = beats.value.find(beat => beat.id === id)
-            if (b) b.x = x
-          })
-        }
-      })
-    }
-  }
-  drag.value = null 
-}
-
-function handleNodeClick(e: MouseEvent, id: string) {
-  if (dragDistance > 5) return
-
-  const isMultiKey = e.shiftKey || e.ctrlKey || e.metaKey
-  selectNode(id, isMultiKey)
-
-  // Open modal if single selection click occurs
-  if (!isMultiKey) {
-    openModal(id)
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -674,8 +764,8 @@ function onImport(e: Event) {
     try {
       const parsed = JSON.parse(ev.target?.result as string)
       if (parsed.characters && parsed.beats) {
-        const oldChars = JSON.parse(JSON.stringify(characters.value))
-        const oldBeats = JSON.parse(JSON.stringify(beats.value))
+        const oldChars   = JSON.parse(JSON.stringify(characters.value))
+        const oldBeats   = JSON.parse(JSON.stringify(beats.value))
         const oldTrashed = JSON.parse(JSON.stringify(trashed.value))
 
         executeCommand({
@@ -707,19 +797,34 @@ function onImport(e: Event) {
 <template>
   <div class="layout">
     
+    <!-- Top Action Navigation -->
+    <div class="top-bar">
+      <button 
+        class="btn-hamburger" 
+        @click="isSidebarOpen = !isSidebarOpen" 
+        title="Toggle Main Menu"
+      >
+        <span>☰</span> <span>Menu</span>
+      </button>
+    </div>
+
+    <!-- Standalone Top-Right Debug Button -->
     <button 
-      class="sidebar-toggle"
-      :class="{ 'is-collapsed': !isSidebarOpen }"
-      @click="isSidebarOpen = !isSidebarOpen"
-      title="Toggle sidebar"
+      class="btn-hamburger debug-btn" 
+      @click="isDebugOpen = true" 
+      title="Open Debug Menu"
     >
-      {{ isSidebarOpen ? '◀' : '▶' }}
+      <span>🐛</span> <span>Debug</span>
     </button>
 
+    <!-- Main Sidebar Panel (Top Overlay) -->
     <aside class="panel" :class="{ 'is-collapsed': !isSidebarOpen }">
-      <div class="brand-header">
-        <h1>RamenFlux</h1>
-        <img src="https://placehold.co/100x100/1e293b/ffffff?text=RF" alt="Logo" class="brand-logo" />
+      <div class="panel-header">
+        <div class="brand-header">
+          <h1>RamenFlux</h1>
+          <img src="https://placehold.co/100x100/1e293b/ffffff?text=RF" alt="Logo" class="brand-logo" />
+        </div>
+        <button class="debug-close-btn" @click="isSidebarOpen = false" title="Close Menu">✖</button>
       </div>
 
       <p class="brand-subtitle">Drag plot-beats side to side. Track characters across beats.</p>
@@ -729,18 +834,17 @@ function onImport(e: Event) {
         <button class="btn-io" :disabled="!canRedo" @click="redo" style="flex: 1">↪️ Redo</button>
       </div>
 
-      <div>➕ Double-click canvas to add a Plot Beat</div>
+      <div style="font-size: 0.82rem; color: #64748b; margin-bottom: 8px;">
+        ➕ Double-click canvas to add a Plot Beat
+      </div>
 
       <button class="btn-io" @click="isTrashModalOpen = true">🗑️ View Trash</button>
-
       <button class="btn-io" @click="exportData">📤 Download JSON</button>
-
       <button class="btn-io" @click="importClick">📥 Import saved JSON</button>
       <input ref="fileInput" type="file" style="display:none" @change="onImport" />
 
       <section class="card char-section">
         <h4>👥 Characters</h4>
-
         <div class="divider" />
 
         <input type="text" v-model="newCharName" placeholder="New character name" @keyup.enter="addGlobalChar" />
@@ -756,9 +860,53 @@ function onImport(e: Event) {
           <p v-if="!characters.length" class="muted" style="margin-bottom:8px">No characters yet.</p>
         </div>
       </section>
-
     </aside>
 
+    <!-- Debug Gray Backdrop Fade -->
+    <div v-if="isDebugOpen" class="debug-backdrop" @click="isDebugOpen = false"></div>
+
+    <!-- Debug Sidebar (Overlay Panel) -->
+    <aside class="debug-panel" :class="{ 'is-open': isDebugOpen }">
+      <div class="debug-header">
+        <h2>🐛 Debug Menu</h2>
+        <button class="debug-close-btn" @click="isDebugOpen = false" title="Close Debug">✖</button>
+      </div>
+
+      <div class="debug-card">
+        <h4>Detected Crossings</h4>
+        <div class="debug-metric">{{ crossingCount }}</div>
+        <p class="debug-hint" style="margin-top: 4px;">
+          Active character path crossings in the current canvas iteration.
+        </p>
+      </div>
+
+      <div class="debug-card">
+        <h4>User Y-Lock</h4>
+        <p class="debug-hint">
+          Y-Lock is currently <strong :style="{ color: isYLocked ? '#34d399' : '#f87171' }">{{ isYLocked ? 'ENABLED' : 'DISABLED' }}</strong>.
+        </p>
+        <button 
+          class="debug-btn-toggle" 
+          :class="{ 'disabled-state': !isYLocked }"
+          @click="isYLocked = !isYLocked"
+        >
+          <span>{{ isYLocked ? 'Disable Y-Lock' : 'Enable Y-Lock' }}</span>
+          <span>{{ isYLocked ? '🔒' : '🔓' }}</span>
+        </button>
+      </div>
+
+      <div class="debug-card">
+        <h4>Y-Coord Recalculation</h4>
+        <p class="debug-hint">
+          Trigger layout recalculation immediately, applying fresh Y coordinates to all nodes without canvas interaction.
+        </p>
+        <button class="debug-btn-action" @click="forceRecalculateY">
+          🔄 Recalculate Y-Coords
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main Board / Canvas -->
     <div
       ref="boardEl"
       class="board"
@@ -824,7 +972,7 @@ function onImport(e: Event) {
     </div>
   </div>
 
-  <!-- Modals remain structural components -->
+  <!-- Modal for Beat Editing -->
   <div v-if="isModalOpen" class="modal-overlay" @mousedown.self="closeModal">
     <div class="modal-content" v-if="activeBeat">
       <div class="modal-header">
@@ -842,25 +990,33 @@ function onImport(e: Event) {
 
         <div class="divider" />
         
-        <h5 style="margin-bottom: 8px;">Characters present</h5>
-        <div class="active-chars">
-          <p v-if="!activeBeat.characters.length" class="muted">None yet.</p>
-          <div v-for="name in activeBeat.characters" :key="name" class="char-row">
-            <span>{{ name }}</span>
-            <button class="btn-icon" @click="removeCharFromBeat(name)">❌</button>
-          </div>
+        <h5 style="margin-bottom: 8px;">Characters Present</h5>
+        
+        <div class="char-checkbox-list">
+          <p v-if="!characters.length" class="muted" style="margin: 4px 0;">No characters registered yet.</p>
+          <label
+            v-for="c in sortedCharactersForModal"
+            :key="c.name"
+            class="char-checkbox-item"
+          >
+            <input
+              type="checkbox"
+              :checked="activeBeat.characters.includes(c.name)"
+              @change="toggleCharInActiveBeat(c.name)"
+            />
+            <span class="char-color-preview" :style="{ backgroundColor: c.color }"></span>
+            <span class="char-name">{{ c.name }}</span>
+          </label>
         </div>
 
-        <div class="add-char-tools">
-          <select v-if="availableChars.length" v-model="charToAdd" @change="addCharToBeat">
-            <option value="" disabled selected>➕ Add existing character…</option>
-            <option v-for="c in availableChars" :key="c" :value="c">{{ c }}</option>
-          </select>
-          
-          <div class="new-char-inline">
-            <input type="text" v-model="modalNewCharName" placeholder="Or create a brand new character..." @keyup.enter="createAndAddCharInModal" />
-            <button class="btn-io" @click="createAndAddCharInModal">Add</button>
-          </div>
+        <div class="new-char-inline" style="margin-top: 12px;">
+          <input 
+            type="text" 
+            v-model="modalNewCharName" 
+            placeholder="Create & attach new character..." 
+            @keyup.enter="createAndAddCharInModal" 
+          />
+          <button class="btn-io" @click="createAndAddCharInModal">Add</button>
         </div>
 
         <div class="divider" />
@@ -881,6 +1037,10 @@ function onImport(e: Event) {
           <div style="flex: 1;">
             <label class="field-label">X-Coordinate</label>
             <input type="number" v-model.number="activeBeat.x" class="num-input" />
+          </div>
+          <div style="flex: 1;" v-if="activeBeat.y !== undefined">
+            <label class="field-label">Y-Coordinate</label>
+            <input type="number" v-model.number="activeBeat.y" class="num-input" />
           </div>
         </div>
 
